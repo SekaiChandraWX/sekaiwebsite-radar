@@ -1,2 +1,2 @@
 libproj-dev
-geos-dev
+libgeos-dev
