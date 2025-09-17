@@ -520,6 +520,27 @@ def check_resolution(radar):
 def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
     try:
+        # CRITICAL FIX: Set radar location from RADAR_LIST if not valid
+        # This MUST happen before creating the display object
+        radar_id = os.path.basename(file_path)[:4]
+        
+        # Check if radar has valid coordinates
+        try:
+            current_lat = radar.latitude["data"][0] if hasattr(radar.latitude, "__getitem__") else radar.latitude["data"]
+            current_lon = radar.longitude["data"][0] if hasattr(radar.longitude, "__getitem__") else radar.longitude["data"]
+        except:
+            current_lat = 0.0
+            current_lon = 0.0
+        
+        # If coordinates are invalid (0,0), get them from RADAR_LIST
+        if current_lat == 0.0 and current_lon == 0.0:
+            for rid, rlat, rlon in RADAR_LIST:
+                if rid == radar_id:
+                    radar.latitude["data"] = np.array([rlat])
+                    radar.longitude["data"] = np.array([rlon])
+                    radar.altitude["data"] = np.array([0])  # Also set altitude
+                    break
+        
         # More robust data validation
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
         vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
@@ -531,14 +552,15 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         if not refl_valid or not vel_valid:
             return None
 
+        # NOW create the display object with corrected coordinates
+        display = pyart.graph.RadarMapDisplay(radar)
+
         # Set up the figure with improved layout
         fig = plt.figure(figsize=(20, 9))
         projection = ccrs.PlateCarree()
 
         ax1 = fig.add_subplot(121, projection=projection)
         ax2 = fig.add_subplot(122, projection=projection, sharex=ax1, sharey=ax1)
-
-        display = pyart.graph.RadarMapDisplay(radar)
 
         # Improved titles with more information
         refl_elevation = radar.elevation["data"][radar.get_slice(refl_sweep_index)].mean()
@@ -549,11 +571,13 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
             f"Dealiased Velocity - {vel_elevation:.2f}° Tilt"
         ]
 
-        # Set plot extent (slightly larger for better context)
+        # Set plot extent using the radar's actual location
+        radar_lat = radar.latitude["data"][0]
+        radar_lon = radar.longitude["data"][0]
         half_width = 35
-        lat_deg, lon_deg = miles_to_degrees(half_width, center_lat)
-        extent = [center_lon - lon_deg, center_lon + lon_deg,
-                  center_lat - lat_deg, center_lat + lat_deg]
+        lat_deg, lon_deg = miles_to_degrees(half_width, radar_lat)
+        extent = [radar_lon - lon_deg, radar_lon + lon_deg,
+                  radar_lat - lat_deg, radar_lat + lat_deg]
 
         # Use custom colormaps or PyART colormaps without prefix
         try:
@@ -610,7 +634,6 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         try:
             base_time_str = radar.time["units"].split("since ")[1]
             scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
-            radar_id = os.path.basename(file_path)[:4]
             main_title = f"{radar_id} - {scan_time.strftime('%B %d, %Y at %H:%M UTC')}"
         except:
             main_title = parse_filename_for_title(file_path)
