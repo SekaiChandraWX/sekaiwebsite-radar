@@ -520,60 +520,27 @@ def check_resolution(radar):
 def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
     try:
-        # Get radar ID from filename
-        radar_id = os.path.basename(file_path)[:4]
-        
-        # Get the correct radar coordinates from RADAR_LIST
-        radar_lat, radar_lon = None, None
-        for rid, rlat, rlon in RADAR_LIST:
-            if rid == radar_id:
-                radar_lat, radar_lon = rlat, rlon
-                break
-        
-        # If not found in list, try to use what's in the radar object
-        if radar_lat is None:
-            try:
-                parsed_lat = radar.latitude["data"][0]
-                parsed_lon = radar.longitude["data"][0]
-                # Use AND instead of OR - both must be valid
-                if parsed_lat != 0.0 and parsed_lon != 0.0:
-                    radar_lat, radar_lon = parsed_lat, parsed_lon
-                else:
-                    # Fallback to center coordinates
-                    radar_lat, radar_lon = center_lat, center_lon
-            except:
-                radar_lat, radar_lon = center_lat, center_lon
-        
-        # Set the radar location in the object
-        radar.latitude["data"] = np.array([radar_lat])
-        radar.longitude["data"] = np.array([radar_lon])
-
-        # Validate data
+        # More robust data validation
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
         vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
 
+        # Check for any non-masked, finite data
         refl_valid = np.any(~np.ma.getmaskarray(refl_data))
         vel_valid = np.any(~np.ma.getmaskarray(vel_data))
 
         if not refl_valid or not vel_valid:
             return None
 
-        # Create display with corrected coordinates
-        display = pyart.graph.RadarMapDisplay(radar)
-        
-        # Rest of your plotting code remains the same...
+        # Set up the figure with improved layout
         fig = plt.figure(figsize=(20, 9))
         projection = ccrs.PlateCarree()
 
         ax1 = fig.add_subplot(121, projection=projection)
         ax2 = fig.add_subplot(122, projection=projection, sharex=ax1, sharey=ax1)
 
-        # STEP 2: NOW create the RadarMapDisplay object.
-        # It will be initialized with the corrected coordinates.
         display = pyart.graph.RadarMapDisplay(radar)
 
-        # STEP 3: Proceed with plotting as before.
-        # Titles
+        # Improved titles with more information
         refl_elevation = radar.elevation["data"][radar.get_slice(refl_sweep_index)].mean()
         vel_elevation = radar.elevation["data"][radar.get_slice(vel_sweep_index)].mean()
 
@@ -582,30 +549,26 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
             f"Dealiased Velocity - {vel_elevation:.2f}° Tilt"
         ]
 
-        # Set plot extent
+        # Set plot extent (slightly larger for better context)
         half_width = 35
         lat_deg, lon_deg = miles_to_degrees(half_width, center_lat)
         extent = [center_lon - lon_deg, center_lon + lon_deg,
                   center_lat - lat_deg, center_lat + lat_deg]
 
-        # Use custom colormaps with proper fallback
+        # Try PyART colormaps, fall back to matplotlib if not available
         try:
-            refl_cmap, _ = create_reflectivity_colormap()
-            vel_cmap, _ = create_velocity_colormap()
+            refl_cmap = "pyart_NWSRef"
+            vel_cmap = "pyart_balance"
         except:
-            try:
-                refl_cmap = "pyart_NWSRef"
-                vel_cmap = "pyart_balance"
-            except:
-                refl_cmap = "jet"
-                vel_cmap = "RdBu_r"
+            refl_cmap = "jet"
+            vel_cmap = "RdBu_r"
 
-        # Plot reflectivity with CORRECT range
+        # Plot reflectivity with CORRECT range matching the colormap
         display.plot_ppi_map(
             "reflectivity",
             sweep=refl_sweep_index,
-            vmin=-32.0,  # FIXED: Match working script
-            vmax=94.5,   # FIXED: Match working script
+            vmin=-32.0,  # FIXED: Use exact colormap minimum
+            vmax=94.5,   # FIXED: Use exact colormap maximum
             ax=ax1,
             projection=projection,
             title=titles[0],
@@ -614,15 +577,14 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
             resolution='50m'
         )
 
-        # Plot velocity with proper scaling
-        nyquist_vel = 28.0
+        # Plot velocity with improved colormap and scaling
+        nyquist_vel = 28.0  # Default
         if "nyquist_velocity" in radar.instrument_parameters:
             nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
             if len(nyq_data) > 0:
                 nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
 
-        # Use smaller velocity range for better visualization
-        vel_range = min(30, nyquist_vel)  # FIXED: Use 30 instead of 65
+        vel_range = min(65, nyquist_vel * 2)
 
         display.plot_ppi_map(
             "dealiased_velocity",
@@ -637,7 +599,7 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
             resolution='50m'
         )
 
-        # Main title
+        # Enhanced main title with more metadata
         try:
             base_time_str = radar.time["units"].split("since ")[1]
             scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
@@ -648,11 +610,11 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
 
         plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
 
-        # Attribution
-        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX)",
+        # Add attribution
+        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Improved with PyART",
                  ha='center', fontsize=12, style='italic')
 
-        # Add geographic features
+        # Enhance both subplots with better geographic features
         for ax in [ax1, ax2]:
             ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3, zorder=0)
             ax.add_feature(cfeature.COASTLINE, linewidth=0.8, color='black', zorder=2)
