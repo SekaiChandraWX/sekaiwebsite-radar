@@ -380,7 +380,6 @@ def get_sweep_info(radar, target_elevation=0.5, tolerance=0.3):
         sweep_ends = radar.sweep_end_ray_index["data"]
         time_data = radar.time["data"]
         base_time = datetime.strptime(radar.time["units"].split("since ")[1], "%Y-%m-%dT%H:%M:%SZ")
-
         elevations = np.array(
             [radar.elevation["data"][start:end + 1].mean() for start, end in zip(sweep_starts, sweep_ends)])
         mean_times = np.array([time_data[start:end + 1].mean() for start, end in zip(sweep_starts, sweep_ends)])
@@ -433,6 +432,7 @@ def pair_sweeps(sweep_info, max_time_diff=30, is_high_res=True):
         closest_vel = None
         refl_time = refl["time"]
         
+        # Prefer velocity sweep with index 1 if available and within time diff
         for vel in vel_sweeps:
             if vel["sweep_index"] == 1 and vel["sweep_index"] not in used_vel:
                 time_diff = abs((vel["time"] - refl_time).total_seconds())
@@ -440,6 +440,7 @@ def pair_sweeps(sweep_info, max_time_diff=30, is_high_res=True):
                     min_diff = time_diff
                     closest_vel = vel
         
+        # If no sweep 1, try any velocity sweep
         if not closest_vel:
             for vel in vel_sweeps:
                 if vel["sweep_index"] in used_vel:
@@ -453,6 +454,7 @@ def pair_sweeps(sweep_info, max_time_diff=30, is_high_res=True):
             pairs.append((refl, closest_vel))
             used_vel.add(closest_vel["sweep_index"])
 
+    # Fallback: If no pairs found and both sweep types exist, pair closest sweeps
     if not pairs and refl_sweeps and vel_sweeps:
         refl = min(refl_sweeps, key=lambda s: abs((s["time"] - refl_sweeps[0]["time"]).total_seconds()))
         vel = min(vel_sweeps, key=lambda s: abs((s["time"] - refl["time"]).total_seconds()))
@@ -518,6 +520,24 @@ def check_resolution(radar):
 def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
     try:
+        # Set radar location properly (crucial for low-res data)
+        radar_id = os.path.basename(file_path)[:4]
+        radar_lat, radar_lon = center_lat, center_lon
+        
+        try:
+            parsed_lat = radar.latitude["data"][0]
+            parsed_lon = radar.longitude["data"][0]
+            if parsed_lat != 0.0 or parsed_lon != 0.0:
+                radar_lat, radar_lon = parsed_lat, parsed_lon
+        except:
+            for rid, rlat, rlon in RADAR_LIST:
+                if rid == radar_id:
+                    radar_lat, radar_lon = rlat, rlon
+                    break
+        
+        radar.latitude["data"] = np.array([radar_lat])
+        radar.longitude["data"] = np.array([radar_lon])
+
         # Validate data
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
         vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
@@ -552,20 +572,24 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         extent = [center_lon - lon_deg, center_lon + lon_deg,
                   center_lat - lat_deg, center_lat + lat_deg]
 
-        # Use custom colormaps or fallback
+        # Use custom colormaps with proper fallback
         try:
             refl_cmap, _ = create_reflectivity_colormap()
             vel_cmap, _ = create_velocity_colormap()
         except:
-            refl_cmap = "jet"
-            vel_cmap = "RdBu_r"
+            try:
+                refl_cmap = "pyart_NWSRef"
+                vel_cmap = "pyart_balance"
+            except:
+                refl_cmap = "jet"
+                vel_cmap = "RdBu_r"
 
-        # Plot reflectivity
+        # Plot reflectivity with CORRECT range
         display.plot_ppi_map(
             "reflectivity",
             sweep=refl_sweep_index,
-            vmin=-32.0,
-            vmax=94.5,
+            vmin=-32.0,  # FIXED: Match working script
+            vmax=94.5,   # FIXED: Match working script
             ax=ax1,
             projection=projection,
             title=titles[0],
@@ -574,14 +598,15 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
             resolution='50m'
         )
 
-        # Plot velocity
+        # Plot velocity with proper scaling
         nyquist_vel = 28.0
         if "nyquist_velocity" in radar.instrument_parameters:
             nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
             if len(nyq_data) > 0:
                 nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
 
-        vel_range = min(65, nyquist_vel * 2)
+        # Use smaller velocity range for better visualization
+        vel_range = min(30, nyquist_vel)  # FIXED: Use 30 instead of 65
 
         display.plot_ppi_map(
             "dealiased_velocity",
@@ -646,6 +671,24 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
 def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Basic radar plotting without CartoPy dependencies."""
     try:
+        # Set radar location properly
+        radar_id = os.path.basename(file_path)[:4]
+        radar_lat, radar_lon = center_lat, center_lon
+        
+        try:
+            parsed_lat = radar.latitude["data"][0]
+            parsed_lon = radar.longitude["data"][0]
+            if parsed_lat != 0.0 or parsed_lon != 0.0:
+                radar_lat, radar_lon = parsed_lat, parsed_lon
+        except:
+            for rid, rlat, rlon in RADAR_LIST:
+                if rid == radar_id:
+                    radar_lat, radar_lon = rlat, rlon
+                    break
+        
+        radar.latitude["data"] = np.array([radar_lat])
+        radar.longitude["data"] = np.array([radar_lon])
+        
         # Get radar data
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
         vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
@@ -670,7 +713,7 @@ def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, c
             refl_cmap = "jet"
             vel_cmap = "RdBu_r"
         
-        # Plot reflectivity
+        # Plot reflectivity with FIXED range
         im1 = ax1.pcolormesh(x/1000, y/1000, refl_data, 
                             vmin=-32.0, vmax=94.5, cmap=refl_cmap, shading='auto')
         ax1.set_title(f"Reflectivity - {radar.elevation['data'][radar.get_slice(refl_sweep_index)].mean():.2f}° Tilt")
@@ -686,7 +729,7 @@ def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, c
             if len(nyq_data) > 0:
                 nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
         
-        vel_range = min(65, nyquist_vel * 2)
+        vel_range = min(30, nyquist_vel)  # FIXED: Use 30 instead of 65
         
         im2 = ax2.pcolormesh(x/1000, y/1000, vel_data, 
                             vmin=-vel_range, vmax=vel_range, cmap=vel_cmap, shading='auto')
