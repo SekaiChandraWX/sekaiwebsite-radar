@@ -933,6 +933,37 @@ with col1:
                         
                         if generate_button:
                             with col2:
+                                st.subheader("Radar Visualization")
+                                with st.spinner("Processing radar data... This may take 2-3 minutes."):
+                                    try:
+                                        fig = process_radar_file_robust(file_url, filename, radar_lat, radar_lon)
+                                        
+                                        if fig:
+                                            st.pyplot(fig, use_container_width=True)
+                                            plt.close(fig)
+                                            gc.collect()
+                                            
+                                            if all(dependency_status.values()):
+                                                st.success("Full radar plot generated successfully!")
+                                            else:
+                                                st.info("Basic radar information displayed. Install PyART and CartoPy for full functionality.")
+                                            
+                                            st.info("Right-click on the image to save it to your device.")
+                                        else:
+                                            st.error("Failed to generate radar plot.")
+                                            
+                                    except Exception as e:
+                                        st.error(f"Error generating radar plot: {str(e)}")
+                                        
+                                        # Show fallback
+                                        st.info("Showing basic radar station information instead:")
+                                        fallback_fig = create_fallback_visualization(radar_id, radar_lat, radar_lon, filename)
+                                        st.pyplot(fallback_fig, use_container_width=True)
+                                        plt.close(fallback_fig)
+                else:
+                    st.warning(f"No radar data available for {radar_id} on {date_input}")
+
+with col2:
     st.subheader("Radar Visualization")
     if not st.session_state.get('radar_select') or not st.session_state.get('time_select'):
         st.info("Select a radar station and time to generate the plot.")
@@ -1001,33 +1032,3 @@ with st.expander("How to Read Radar Data"):
 
 st.markdown("---")
 st.markdown("*Created by Sekai Chandra (@Sekai_WX) | Data from NOAA/National Weather Service*")
-                                with st.spinner("Processing radar data... This may take 2-3 minutes."):
-                                    try:
-                                        fig = process_radar_file_robust(file_url, filename, radar_lat, radar_lon)
-                                        
-                                        if fig:
-                                            st.pyplot(fig, use_container_width=True)
-                                            plt.close(fig)
-                                            gc.collect()
-                                            
-                                            if all(dependency_status.values()):
-                                                st.success("Full radar plot generated successfully!")
-                                            else:
-                                                st.info("Basic radar information displayed. Install PyART and CartoPy for full functionality.")
-                                            
-                                            st.info("Right-click on the image to save it to your device.")
-                                        else:
-                                            st.error("Failed to generate radar plot.")
-                                            
-                                    except Exception as e:
-                                        st.error(f"Error generating radar plot: {str(e)}")
-                                        
-                                        # Show fallback
-                                        st.info("Showing basic radar station information instead:")
-                                        fallback_fig = create_fallback_visualization(radar_id, radar_lat, radar_lon, filename)
-                                        st.pyplot(fallback_fig, use_container_width=True)
-                                        plt.close(fallback_fig)
-                else:
-                    st.warning(f"No radar data available for {radar_id} on {date_input}")
-
-with col2:
