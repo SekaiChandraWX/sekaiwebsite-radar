@@ -1,235 +1,81 @@
 import streamlit as st
-import os
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import pyart
 import numpy as np
-from datetime import datetime, timedelta
-import matplotlib.ticker as mticker
-from geopy.geocoders import Nominatim
-import requests
-from bs4 import BeautifulSoup
-import re
-from math import radians, sin, cos, sqrt, atan2
-import urllib.request
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 import tempfile
-import time
-import gc
-import logging
+import os
+import re
+from datetime import datetime
+from matplotlib.colors import ListedColormap
+import traceback
 
-# Try to import radar-specific packages with fallback
-try:
-    import pyart
-    PYART_AVAILABLE = True
-except ImportError:
-    try:
-        import arm_pyart as pyart
-        PYART_AVAILABLE = True
-    except ImportError:
-        PYART_AVAILABLE = False
-
-try:
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
-    from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
-    CARTOPY_AVAILABLE = True
-except ImportError:
-    CARTOPY_AVAILABLE = False
-
-try:
-    from matplotlib.colors import ListedColormap
-    MATPLOTLIB_COLORS_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_COLORS_AVAILABLE = False
-
-# Set page config
+# Page config
 st.set_page_config(
-    page_title="NEXRAD Radar Viewer", 
-    page_icon="📡",
-    layout="wide"
+    page_title="NEXRAD Radar Viewer",
+    page_icon="⛈️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Suppress matplotlib font debugging messages
-logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
+# Add some CSS for better styling
+st.markdown("""
+<style>
+    .main .block-container {
+        padding-top: 2rem;
+    }
+    .stFileUploader {
+        margin-bottom: 1rem;
+    }
+    .sidebar .sidebar-content {
+        background-color: #f0f2f6;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# PLACEHOLDER: Insert your RADAR_LIST here
-RADAR_LIST = [
-    ("KBMX", 33.172, -86.770), ("KEOX", 31.460, -85.459), ("KHTX", 34.931, -86.084),
-    ("KMXX", 32.537, -85.790), ("KMOB", 30.679, -88.240), ("KSRX", 35.290, -94.362),
-    ("KLZK", 34.836, -92.262), ("KFSX", 34.574, -111.198), ("KIWA", 33.289, -111.670),
-    ("KEMX", 31.894, -110.630), ("KYUX", 32.495, -114.656), ("KBBX", 39.496, -121.632),
-    ("KEYX", 35.098, -117.561), ("KBHX", 40.499, -124.292), ("KVTX", 34.412, -119.179),
-    ("KDAX", 38.501, -121.678), ("KNKX", 32.919, -117.041), ("KMUX", 37.155, -121.898),
-    ("KHNX", 36.314, -119.632), ("KSOX", 33.818, -117.636), ("KVBX", 34.839, -120.398),
-    ("KFTG", 39.786, -104.546), ("KGJX", 39.062, -108.214), ("KPUX", 38.460, -104.181),
-    ("KDOX", 38.826, -75.440), ("KEVX", 30.565, -85.922), ("KJAX", 30.485, -81.702),
-    ("KBYX", 24.597, -81.703), ("KMLB", 28.113, -80.654), ("KAMX", 25.611, -80.413),
-    ("KTLH", 30.398, -84.329), ("KTBW", 27.705, -82.402), ("KFFC", 33.363, -84.566),
-    ("KVAX", 30.890, -83.002), ("KJGX", 32.675, -83.351), ("PGUA", 13.456, 144.811),
-    ("PHKI", 21.894, -159.552), ("PHKM", 20.125, -155.778), ("PHMO", 21.133, -157.180),
-    ("PHWA", 19.095, -155.569), ("KDMX", 41.731, -93.723), ("KDVN", 41.612, -90.581),
-    ("KCBX", 43.490, -116.236), ("KSFX", 43.106, -112.686), ("KLOT", 41.604, -88.085),
-    ("KILX", 40.150, -89.337), ("KVWX", 38.260, -87.724), ("KIWX", 41.359, -85.700),
-    ("KIND", 39.708, -86.280), ("KDDC", 37.761, -99.969), ("KGLD", 39.367, -101.700),
-    ("KTWX", 38.997, -96.232), ("KICT", 37.654, -97.443), ("KHPX", 36.737, -87.285),
-    ("KJKL", 37.591, -83.313), ("KLVX", 37.975, -85.944), ("KPAH", 37.068, -88.772),
-    ("KPOE", 31.155, -92.976), ("KLCH", 30.125, -93.216), ("KLIX", 30.337, -89.825),
-    ("KSHV", 32.451, -93.841), ("KBOX", 41.956, -71.137), ("KCBW", 46.039, -67.806),
-    ("KGYX", 43.891, -70.256), ("KDTX", 42.700, -83.472), ("KAPX", 44.906, -84.720),
-    ("KGRR", 42.894, -85.545), ("KMQT", 46.531, -87.548), ("KDLH", 46.837, -92.210),
-    ("KMPX", 44.849, -93.565), ("KEAX", 38.810, -94.264), ("KSGF", 37.235, -93.400),
-    ("KLSX", 38.699, -90.683), ("KGWX", 33.897, -88.329), ("KDGX", 32.280, -89.984),
-    ("KBLX", 45.854, -108.607), ("KGGW", 48.206, -106.625), ("KTFX", 47.460, -111.385),
-    ("KMSX", 47.041, -113.986), ("KMHX", 34.776, -76.876), ("KRAX", 35.665, -78.490),
-    ("KLTX", 33.989, -78.429), ("KBIS", 46.771, -100.760), ("KMVX", 47.528, -97.325),
-    ("KMBX", 48.393, -100.864), ("KUEX", 40.321, -98.442), ("KLNX", 41.958, -100.576),
-    ("KOAX", 41.320, -96.367), ("KABX", 35.150, -106.824), ("KFDX", 34.634, -103.619),
-    ("KHDX", 33.077, -106.120), ("KLRX", 40.740, -116.803), ("KESX", 35.701, -114.891),
-    ("KRGX", 39.754, -119.462), ("KENX", 42.586, -74.064), ("KBGM", 42.200, -75.985),
-    ("KBUF", 42.949, -78.737), ("KTYX", 43.756, -75.680), ("KOKX", 40.865, -72.864),
-    ("KCLE", 41.413, -81.860), ("KILN", 39.420, -83.822), ("KFDR", 34.362, -98.977),
-    ("KTLX", 35.333, -97.278), ("KINX", 36.175, -95.564), ("KVNX", 36.741, -98.128),
-    ("KMAX", 42.081, -122.717), ("KPDT", 45.691, -118.853), ("KRTX", 45.715, -122.965),
-    ("KDIX", 39.947, -74.411), ("KPBZ", 40.532, -80.218), ("KCCX", 40.923, -78.004),
-    ("TJUA", 18.116, -66.078), ("KCLX", 32.655, -81.042), ("KCAE", 33.949, -81.119),
-    ("KGSP", 34.883, -82.220), ("KABR", 45.456, -98.413), ("KUDX", 44.125, -102.830),
-    ("KFSD", 43.588, -96.729), ("KMRX", 36.168, -83.402), ("KNQA", 35.345, -89.873),
-    ("KOHX", 36.247, -86.563), ("KAMA", 35.233, -101.709), ("KBRO", 25.916, -97.419),
-    ("KGRK", 30.722, -97.383), ("KCRP", 27.784, -97.511), ("KFWS", 32.573, -97.303),
-    ("KDYX", 32.538, -99.254), ("KEPZ", 31.873, -106.698), ("KHGX", 29.472, -95.079),
-    ("KDFX", 29.273, -100.280), ("KLBB", 33.654, -101.814), ("KMAF", 31.943, -102.189),
-    ("KSJT", 31.371, -100.492), ("KEWX", 29.704, -98.029), ("KICX", 37.591, -112.862),
-    ("KMTX", 41.263, -112.448), ("KFCX", 37.024, -80.274), ("KLWX", 38.976, -77.487),
-    ("KAKQ", 36.984, -77.008), ("KCXX", 44.511, -73.166), ("KLGX", 47.116, -124.107),
-    ("KATX", 48.195, -122.496), ("KOTX", 47.681, -117.626), ("KGRB", 44.499, -88.111),
-    ("KARX", 43.823, -91.191), ("KMKX", 42.968, -88.551), ("KRLX", 38.311, -81.723),
-    ("KCYS", 41.152, -104.806), ("KRIW", 43.066, -108.477), ("KHDC", 30.519, -90.407), ("KJAN", 32.319, -90.077)
-]
-
-# Check dependencies and show status
-dependency_status = {
-    "PyART": PYART_AVAILABLE,
-    "CartoPy": CARTOPY_AVAILABLE, 
-    "Matplotlib Colors": MATPLOTLIB_COLORS_AVAILABLE
+# NEXRAD radar stations database
+RADAR_STATIONS = {
+    "KBMX": {"name": "Birmingham, AL", "lat": 33.172, "lon": -86.770},
+    "KEOX": {"name": "Fort Rucker, AL", "lat": 31.460, "lon": -85.459},
+    "KHTX": {"name": "Huntsville, AL", "lat": 34.931, "lon": -86.084},
+    "KMXX": {"name": "Montgomery, AL", "lat": 32.537, "lon": -85.790},
+    "KMOB": {"name": "Mobile, AL", "lat": 30.679, "lon": -88.240},
+    "KSRX": {"name": "Fort Smith, AR", "lat": 35.290, "lon": -94.362},
+    "KLZK": {"name": "Little Rock, AR", "lat": 34.836, "lon": -92.262},
+    "KFSX": {"name": "Flagstaff, AZ", "lat": 34.574, "lon": -111.198},
+    "KIWA": {"name": "Phoenix, AZ", "lat": 33.289, "lon": -111.670},
+    "KEMX": {"name": "Tucson, AZ", "lat": 31.894, "lon": -110.630},
+    "KYUX": {"name": "Yuma, AZ", "lat": 32.495, "lon": -114.656},
+    "KBBX": {"name": "Beale AFB, CA", "lat": 39.496, "lon": -121.632},
+    "KEYX": {"name": "Edwards AFB, CA", "lat": 35.098, "lon": -117.561},
+    "KBHX": {"name": "Eureka, CA", "lat": 40.499, "lon": -124.292},
+    "KVTX": {"name": "Ventura, CA", "lat": 34.412, "lon": -119.179},
+    "KDAX": {"name": "Sacramento, CA", "lat": 38.501, "lon": -121.678},
+    "KNKX": {"name": "San Diego, CA", "lat": 32.919, "lon": -117.041},
+    "KMUX": {"name": "San Francisco, CA", "lat": 37.155, "lon": -121.898},
+    "KHNX": {"name": "San Joaquin Valley, CA", "lat": 36.314, "lon": -119.632},
+    "KSOX": {"name": "Santa Ana Mountains, CA", "lat": 33.818, "lon": -117.636},
+    "KVBX": {"name": "Vandenberg AFB, CA", "lat": 34.839, "lon": -120.398},
+    "KFTG": {"name": "Denver, CO", "lat": 39.786, "lon": -104.546},
+    "KGJX": {"name": "Grand Junction, CO", "lat": 39.062, "lon": -108.214},
+    "KPUX": {"name": "Pueblo, CO", "lat": 38.460, "lon": -104.181},
+    "KDOX": {"name": "Dover AFB, DE", "lat": 38.826, "lon": -75.440},
+    "KEVX": {"name": "Eglin AFB, FL", "lat": 30.565, "lon": -85.922},
+    "KJAX": {"name": "Jacksonville, FL", "lat": 30.485, "lon": -81.702},
+    "KBYX": {"name": "Key West, FL", "lat": 24.597, "lon": -81.703},
+    "KMLB": {"name": "Melbourne, FL", "lat": 28.113, "lon": -80.654},
+    "KAMX": {"name": "Miami, FL", "lat": 25.611, "lon": -80.413},
+    "KTLH": {"name": "Tallahassee, FL", "lat": 30.398, "lon": -84.329},
+    "KTBW": {"name": "Tampa, FL", "lat": 27.705, "lon": -82.402},
+    "KFFC": {"name": "Atlanta, GA", "lat": 33.363, "lon": -84.566},
+    "KVAX": {"name": "Moody AFB, GA", "lat": 30.890, "lon": -83.002},
+    "KJGX": {"name": "Robins AFB, GA", "lat": 32.675, "lon": -83.351},
+    # Add more stations as needed...
 }
 
-# Show dependency status in sidebar
-with st.sidebar:
-    st.subheader("System Status")
-    for dep, available in dependency_status.items():
-        if available:
-            st.success(f"✅ {dep}")
-        else:
-            st.error(f"❌ {dep}")
-    
-    if all(dependency_status.values()):
-        st.success("🎉 Full radar processing available!")
-    else:
-        st.warning("⚠️ Limited functionality - some dependencies missing")
-
-@st.cache_data
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """Calculate the great-circle distance between two points in miles."""
-    R = 3958.8  # Earth's radius in miles
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c
-
-@st.cache_data
-def get_closest_radars(lat, lon, max_distance=230):
-    """Return a list of radars sorted by distance, within max_distance miles."""
-    distances = []
-    for radar_id, radar_lat, radar_lon in RADAR_LIST:
-        distance = haversine_distance(lat, lon, radar_lat, radar_lon)
-        if distance <= max_distance:
-            distances.append((radar_id, distance, radar_lat, radar_lon))
-    return sorted(distances, key=lambda x: x[1])
-
-@st.cache_data(ttl=3600)
-def get_location_coordinates(location):
-    """Use geopy to get latitude and longitude for a location with retries."""
-    geolocator = Nominatim(user_agent="radar_plotter")
-    max_retries = 3
-    retry_delay = 2
-
-    for attempt in range(max_retries):
-        try:
-            loc = geolocator.geocode(location, timeout=10)
-            if loc:
-                return loc.latitude, loc.longitude
-            else:
-                raise ValueError(f"Location '{location}' not found.")
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                continue
-            else:
-                raise ValueError(f"Geocoding error after {max_retries} attempts: {str(e)}")
-
-@st.cache_data(ttl=1800)
-def get_nexrad_files_for_date(radar_id, date_obj):
-    """Get available NEXRAD files for a specific radar and date."""
-    base_url = f"https://www.ncdc.noaa.gov/nexradinv/bdp-download.jsp?id={radar_id}&yyyy={date_obj.year}&mm={date_obj.strftime('%m')}&dd={date_obj.strftime('%d')}&product=AAL2"
-    
-    try:
-        response = requests.get(base_url, timeout=30)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        links = soup.find_all("a", href=True)
-        
-        gz_cutoff = datetime(2016, 6, 1, 13, 0)
-        include_non_gz = date_obj >= gz_cutoff.date()
-        
-        file_urls = []
-        for link in links:
-            href = link["href"]
-            if href.endswith(".gz") or (include_non_gz and href.endswith("_V06")):
-                file_urls.append(href)
-        
-        # Parse file times
-        file_times = []
-        for url in file_urls:
-            filename = os.path.basename(url)
-            try:
-                file_time_str = filename[4:19]
-                file_time = datetime.strptime(file_time_str, "%Y%m%d_%H%M%S")
-                file_times.append((file_time, url, filename))
-            except ValueError:
-                continue
-        
-        return sorted(file_times, key=lambda x: x[0])
-    
-    except Exception as e:
-        st.error(f"Error accessing NOAA data for {radar_id}: {str(e)}")
-        return []
-
-def download_radar_file(file_url):
-    """Download radar file to temporary location."""
-    filename = os.path.basename(file_url)
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.gz' if filename.endswith('.gz') else '') as tmp_file:
-        temp_path = tmp_file.name
-    
-    try:
-        urllib.request.urlretrieve(file_url, temp_path)
-        return temp_path
-    except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise Exception(f"Download error: {str(e)}")
-
-def miles_to_degrees(miles, latitude):
-    """Convert miles to degrees at a given latitude."""
-    lat_degrees = miles / 69.0
-    lon_degrees = miles / (69.0 * np.cos(np.radians(latitude)))
-    return lat_degrees, lon_degrees
-
-def create_reflectivity_colormap():
-    """Create custom reflectivity colormap"""
-    # PLACEHOLDER: Insert your reflectivity color_data here
+def create_custom_reflectivity_colormap():
+    """Create custom reflectivity colormap matching the original script"""
     color_data = [
         (-32.0, 115, 77, 172), (-31.5, 115, 78, 168), (-31.0, 115, 79, 165), (-30.5, 115, 81, 162),
         (-30.0, 116, 82, 158), (-29.5, 116, 84, 155), (-29.0, 116, 85, 152), (-28.5, 117, 86, 148),
@@ -296,13 +142,13 @@ def create_reflectivity_colormap():
         (92.0, 140, 60, 40), (92.5, 135, 50, 32), (93.0, 130, 40, 24), (93.5, 125, 30, 16),
         (94.0, 120, 20, 8), (94.5, 115, 10, 1)
     ]
+    
     dbz_values = np.array([x[0] for x in color_data])
-    colors = [(r / 255, g / 255, b / 255) for _, r, g, b in color_data]
-    return ListedColormap(colors, name="custom_reflectivity"), dbz_values
+    colors_rgb = [(r, g, b) for _, r, g, b in color_data]
+    return dbz_values, colors_rgb
 
-def create_velocity_colormap():
-    """Create custom velocity colormap"""
-    # PLACEHOLDER: Insert your velocity color_data here
+def create_custom_velocity_colormap():
+    """Create custom velocity colormap matching the original script"""
     color_data = [
         (-65.4, 127, 0, 207), (-64.9, 255, 0, 132), (-64.4, 249, 0, 132), (-63.9, 243, 0, 133),
         (-63.4, 237, 0, 134), (-62.8, 231, 0, 135), (-62.3, 225, 1, 136), (-61.8, 219, 1, 137),
@@ -369,23 +215,49 @@ def create_velocity_colormap():
         (61.6, 117, 18, 9), (62.2, 114, 15, 8), (62.7, 110, 12, 6), (63.2, 107, 9, 4),
         (64.2, 103, 6, 2), (64.9, 255, 255, 255)
     ]
-    mps_values = np.array([x[0] for x in color_data])
-    colors = [(r / 255, g / 255, b / 255) for _, r, g, b in color_data]
-    return ListedColormap(colors, name="custom_velocity"), mps_values
+    
+    vel_values = np.array([x[0] for x in color_data])
+    colors_rgb = [(r, g, b) for _, r, g, b in color_data]
+    return vel_values, colors_rgb
+
+def parse_nexrad_filename(filename):
+    """Parse NEXRAD filename to extract radar station, date, and time"""
+    # Remove path and extension
+    basename = os.path.basename(filename)
+    if basename.endswith('.gz'):
+        basename = basename[:-3]
+    
+    # Pattern: KXXXYYYYMMDDHHMMSS
+    pattern = r'^(K[A-Z]{3})(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})'
+    match = re.match(pattern, basename)
+    
+    if match:
+        radar_id, year, month, day, hour, minute, second = match.groups()
+        try:
+            dt = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
+            return {
+                'radar_id': radar_id,
+                'datetime': dt,
+                'station_info': RADAR_STATIONS.get(radar_id, {'name': 'Unknown', 'lat': 0, 'lon': 0})
+            }
+        except ValueError:
+            pass
+    
+    return None
 
 def detect_data_age(radar):
-    """Detect if radar data is old (low-res) or new (high-res) based on the original check_resolution logic."""
+    """Detect if radar data is old (low-res) or new (high-res)"""
     try:
         sweep_index = 0
         sweep_slice = radar.get_slice(sweep_index)
 
-        # Use velocity field to check data shape (as in original)
+        # Use velocity field to check data shape
         if 'velocity' in radar.fields:
             data_shape = radar.fields["velocity"]["data"][sweep_slice].shape
         elif 'reflectivity' in radar.fields:
             data_shape = radar.fields["reflectivity"]["data"][sweep_slice].shape
         else:
-            return "new"  # Default to new if can't determine
+            return "new"
 
         total_gates = data_shape[0] * data_shape[1]
 
@@ -400,52 +272,23 @@ def detect_data_age(radar):
         # Check super resolution flag
         is_super_res = radar.instrument_parameters.get("super_resolution", {}).get("data", [0])[0] == 1
 
-        # Apply original logic: if year < 2008, it's old (low-res)
+        # Apply original logic
         if base_year is not None and base_year < 2008:
             return "old"
 
-        # Gate threshold from original: 1,000,000
         gate_threshold = 1000000
-
-        # If high gate count OR super resolution, it's new (high-res)
         if total_gates >= gate_threshold or is_super_res:
             return "new"
         else:
             return "old"
 
     except Exception as e:
-        print(f"Debug: Error detecting data age: {e}, defaulting to new")
+        st.warning(f"Error detecting data age: {e}, defaulting to new")
         return "new"
 
-def find_best_sweep(radar, field_name):
-    """Find sweep with most valid data points."""
-    best_sweep = 0
-    max_valid = 0
-    
-    for sweep_idx in range(radar.nsweeps):
-        try:
-            sweep_slice = radar.get_slice(sweep_idx)
-            field_data = radar.fields[field_name]['data'][sweep_slice]
-            valid_points = (~field_data.mask).sum() if hasattr(field_data, 'mask') else len(field_data.flatten())
-            
-            if valid_points > max_valid:
-                max_valid = valid_points
-                best_sweep = sweep_idx
-                
-            # If we find a sweep with lots of valid data, use it
-            if valid_points > 1000:
-                return sweep_idx
-                
-        except Exception as e:
-            continue
-            
-    return best_sweep
-
 def advanced_velocity_dealiasing_new_data(radar, vel_sweep):
-    """Advanced dealiasing for new data with tornadic signature handling."""
+    """Advanced dealiasing for new data with tornadic signature handling"""
     try:
-        print("Debug: Applying advanced dealiasing for new data...")
-
         # Get Nyquist velocity
         nyq = 28.0
         if 'nyquist_velocity' in radar.instrument_parameters:
@@ -459,20 +302,15 @@ def advanced_velocity_dealiasing_new_data(radar, vel_sweep):
                 if nyq_temp > 0 and nyq_temp < 100:
                     nyq = float(nyq_temp)
 
-        print(f"Debug: Using Nyquist velocity: {nyq} m/s")
-
         # Calculate velocity texture
-        print("Debug: Calculating velocity texture...")
         vel_texture = pyart.retrieve.calculate_velocity_texture(radar, vel_field='velocity')
         radar.add_field('vel_texture', vel_texture, replace_existing=True)
 
         # Create gate filter for non-tornadic areas
-        print("Debug: Creating gate filter for non-tornadic areas...")
         gfilter_nontornadic = pyart.filters.GateFilter(radar)
         gfilter_nontornadic.exclude_above('vel_texture', 5)
 
         # Dealias non-tornadic velocity field
-        print("Debug: Dealiasing non-tornadic velocity field...")
         corrected_vel_nontornadic = pyart.correct.dealias_region_based(
             radar,
             vel_field="velocity",
@@ -482,13 +320,11 @@ def advanced_velocity_dealiasing_new_data(radar, vel_sweep):
         radar.add_field('dealiased_nontornadic', corrected_vel_nontornadic, replace_existing=True)
 
         # Create gate filter for tornadic signatures
-        print("Debug: Creating gate filter for tornadic signatures...")
         gfilter_tornadic = pyart.filters.GateFilter(radar)
         gfilter_tornadic.exclude_below('reflectivity', 30)
         gfilter_tornadic.exclude_below('vel_texture', 5)
 
         # Dealias tornadic signatures
-        print("Debug: Dealiasing tornadic signatures...")
         corrected_vel_temp = pyart.correct.dealias_region_based(
             radar,
             vel_field="velocity",
@@ -497,7 +333,6 @@ def advanced_velocity_dealiasing_new_data(radar, vel_sweep):
         radar.add_field('temp_dealiased_velocity', corrected_vel_temp, replace_existing=True)
 
         # Apply phase unwrapping to tornadic areas
-        print("Debug: Applying phase unwrapping to tornadic areas...")
         corrected_vel_tornadic = pyart.correct.dealias_unwrap_phase(
             radar,
             vel_field='temp_dealiased_velocity',
@@ -506,7 +341,6 @@ def advanced_velocity_dealiasing_new_data(radar, vel_sweep):
         radar.add_field('dealiased_tornadic', corrected_vel_tornadic, replace_existing=True)
 
         # Combine dealiased fields
-        print("Debug: Combining dealiased fields...")
         nontornadic = radar.fields['dealiased_nontornadic']['data']
         tornadic = radar.fields['dealiased_tornadic']['data']
 
@@ -514,18 +348,15 @@ def advanced_velocity_dealiasing_new_data(radar, vel_sweep):
         dealiased = np.ma.where(dealiased.mask, tornadic, dealiased)
         radar.add_field_like('dealiased_nontornadic', 'corrected_velocity', dealiased)
 
-        print("Debug: Advanced velocity dealiasing completed successfully!")
         return True
 
     except Exception as e:
-        print(f"Debug: Advanced dealiasing failed: {e}")
+        st.warning(f"Advanced dealiasing failed: {e}")
         return False
 
 def simple_velocity_dealiasing_old_data(radar, vel_sweep):
-    """Simple dealiasing for old data without tornadic signature handling."""
+    """Simple dealiasing for old data"""
     try:
-        print("Debug: Applying simple dealiasing for old data...")
-
         # Get Nyquist velocity
         nyq = 28.0
         if 'nyquist_velocity' in radar.instrument_parameters:
@@ -539,10 +370,7 @@ def simple_velocity_dealiasing_old_data(radar, vel_sweep):
                 if nyq_temp > 0 and nyq_temp < 100:
                     nyq = float(nyq_temp)
 
-        print(f"Debug: Using Nyquist velocity: {nyq} m/s")
-
         # Simple region-based dealiasing
-        print("Debug: Applying simple region-based dealiasing...")
         velocity_dealiased = pyart.correct.dealias_region_based(
             radar,
             vel_field="velocity",
@@ -555,682 +383,340 @@ def simple_velocity_dealiasing_old_data(radar, vel_sweep):
         radar.add_field("corrected_velocity", velocity_dealiased, replace_existing=True)
         radar.fields["corrected_velocity"]["units"] = "m/s"
 
-        print("Debug: Simple velocity dealiasing completed successfully!")
         return True
 
     except Exception as e:
-        print(f"Debug: Simple dealiasing failed: {e}")
+        st.warning(f"Simple dealiasing failed: {e}")
         return False
 
-def get_sweep_info(radar, target_elevation=0.5, tolerance=0.3):
-    """Get information about sweeps with valid data near target elevation - UPDATED."""
-    try:
-        # Find best sweeps for each field
-        refl_sweep = find_best_sweep(radar, 'reflectivity') if 'reflectivity' in radar.fields else 0
-        vel_sweep = find_best_sweep(radar, 'velocity') if 'velocity' in radar.fields else 0
-        
-        sweep_info = []
-        
-        # Add reflectivity sweep info
-        if 'reflectivity' in radar.fields:
-            try:
-                base_time_str = radar.time["units"].split("since ")[1]
-                base_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
-                sweep_time = base_time + timedelta(seconds=int(radar.time["data"][radar.get_slice(refl_sweep).start]))
-                elevation = radar.elevation["data"][radar.get_slice(refl_sweep)].mean()
-                
-                sweep_info.append({
-                    "sweep_index": refl_sweep,
-                    "time": sweep_time,
-                    "type": ["reflectivity"],
-                    "elevation": elevation
-                })
-            except:
-                sweep_info.append({
-                    "sweep_index": refl_sweep,
-                    "time": datetime.now(),
-                    "type": ["reflectivity"],
-                    "elevation": 0.5
-                })
-        
-        # Add velocity sweep info
-        if 'velocity' in radar.fields:
-            try:
-                base_time_str = radar.time["units"].split("since ")[1]
-                base_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
-                sweep_time = base_time + timedelta(seconds=int(radar.time["data"][radar.get_slice(vel_sweep).start]))
-                elevation = radar.elevation["data"][radar.get_slice(vel_sweep)].mean()
-                
-                sweep_info.append({
-                    "sweep_index": vel_sweep,
-                    "time": sweep_time,
-                    "type": ["velocity"],
-                    "elevation": elevation
-                })
-            except:
-                sweep_info.append({
-                    "sweep_index": vel_sweep,
-                    "time": datetime.now(),
-                    "type": ["velocity"],
-                    "elevation": 0.5
-                })
-        
-        return sweep_info
-    except Exception as e:
-        return []
+def find_best_sweep(radar, field_name):
+    """Find the best sweep with most valid data points"""
+    for sweep_idx in range(radar.nsweeps):
+        sweep_slice = radar.get_slice(sweep_idx)
+        field_data = radar.fields[field_name]['data'][sweep_slice]
+        valid_points = (~field_data.mask).sum() if hasattr(field_data, 'mask') else len(field_data.flatten())
+        if valid_points > 1000:
+            return sweep_idx
+    return 0
 
-def pair_sweeps(sweep_info, max_time_diff=30, is_high_res=True):
-    """Pair reflectivity and velocity sweeps - UPDATED."""
-    refl_sweeps = [s for s in sweep_info if "reflectivity" in s["type"]]
-    vel_sweeps = [s for s in sweep_info if "velocity" in s["type"]]
-
-    pairs = []
+def create_plotly_radar_plot(radar, field_name, sweep_idx, title, color_scale, vmin, vmax, max_range=250, show_range_rings=True):
+    """Create interactive Plotly radar plot"""
+    # Get data for the sweep
+    sweep_slice = radar.get_slice(sweep_idx)
+    field_data = radar.fields[field_name]['data'][sweep_slice]
     
-    if refl_sweeps and vel_sweeps:
-        # Just pair the first (best) sweep of each type
-        pairs.append((refl_sweeps[0], vel_sweeps[0]))
-
-    return pairs
-
-def simple_improved_dealias_velocity(radar, vel_sweep_index):
-    """Improved velocity dealiasing using data age detection."""
-    try:
-        # Detect data age
-        data_age = detect_data_age(radar)
-        print(f"Debug: Detected {data_age} radar data")
-
-        dealiased_success = False
-
-        if data_age == "new":
-            # Use advanced dealiasing for new data
-            success = advanced_velocity_dealiasing_new_data(radar, vel_sweep_index)
-            if success:
-                dealiased_success = True
-            else:
-                # Fallback to simple method
-                print("Debug: Falling back to simple dealiasing...")
-                success = simple_velocity_dealiasing_old_data(radar, vel_sweep_index)
-                dealiased_success = success
-        else:
-            # Use simple dealiasing for old data
-            success = simple_velocity_dealiasing_old_data(radar, vel_sweep_index)
-            dealiased_success = success
-
-        if not dealiased_success:
-            print("Debug: Using original velocity data as final fallback...")
-            radar.add_field("corrected_velocity", radar.fields["velocity"], replace_existing=True)
-            dealiased_success = True
-
-        # Convert to mph for better visualization
-        if dealiased_success and "corrected_velocity" in radar.fields:
-            print("Converting velocity from m/s to MPH...")
-            velocity_mph = radar.fields["corrected_velocity"].copy()
-            velocity_mph['data'] = velocity_mph['data'] * 2.237
-            velocity_mph['units'] = 'MPH'
-            radar.add_field("corrected_velocity_mph", velocity_mph, replace_existing=True)
-            
-            # Also add the original field name for compatibility
-            radar.add_field("dealiased_velocity", radar.fields["corrected_velocity"], replace_existing=True)
-
-    except Exception as e:
-        st.error(f"Error in velocity dealiasing: {e}")
-        # Final fallback
-        if "velocity" in radar.fields:
-            radar.add_field("dealiased_velocity", radar.fields["velocity"], replace_existing=True)
-            radar.add_field("corrected_velocity", radar.fields["velocity"], replace_existing=True)
-
-def parse_filename_for_title(file_path):
-    """Parse filename to create plot title."""
-    filename = os.path.basename(file_path)
-    radar_id = filename[:4]
-    date_str = filename[4:12]
-    time_str = filename[13:19]
-    date_time = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
-    date_formatted = date_time.strftime("%B %d, %Y")
-    time_formatted = date_time.strftime("%H:%M")
-    return f"{radar_id} data for {date_formatted} at {time_formatted} UTC"
-
-def check_resolution(radar):
-    """Determine if radar file is low-res or high-res - kept for compatibility."""
-    data_age = detect_data_age(radar)
-    return data_age == "new"
-
-def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
-    """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
-    try:
-        # CRITICAL FIX: Set radar location from RADAR_LIST if not valid
-        radar_id = os.path.basename(file_path)[:4]
-        
-        # Check if radar has valid coordinates
-        try:
-            current_lat = radar.latitude["data"][0] if hasattr(radar.latitude, "__getitem__") else radar.latitude["data"]
-            current_lon = radar.longitude["data"][0] if hasattr(radar.longitude, "__getitem__") else radar.longitude["data"]
-        except:
-            current_lat = 0.0
-            current_lon = 0.0
-        
-        # If coordinates are invalid (0,0), get them from RADAR_LIST
-        if current_lat == 0.0 and current_lon == 0.0:
-            for rid, rlat, rlon in RADAR_LIST:
-                if rid == radar_id:
-                    radar.latitude["data"] = np.array([rlat])
-                    radar.longitude["data"] = np.array([rlon])
-                    radar.altitude["data"] = np.array([0])
-                    break
-        
-        # Use corrected_velocity if available, otherwise dealiased_velocity
-        vel_field = "corrected_velocity_mph" if "corrected_velocity_mph" in radar.fields else "dealiased_velocity"
-        
-        # More robust data validation
-        refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
-        vel_data = radar.fields[vel_field]["data"][radar.get_slice(vel_sweep_index)]
-
-        # Check for any non-masked, finite data
-        refl_valid = np.any(~np.ma.getmaskarray(refl_data))
-        vel_valid = np.any(~np.ma.getmaskarray(vel_data))
-
-        if not refl_valid or not vel_valid:
-            return None
-
-        # NOW create the display object with corrected coordinates
-        display = pyart.graph.RadarMapDisplay(radar)
-
-        # Set up the figure with improved layout
-        fig = plt.figure(figsize=(20, 9))
-        projection = ccrs.PlateCarree()
-
-        ax1 = fig.add_subplot(121, projection=projection)
-        ax2 = fig.add_subplot(122, projection=projection, sharex=ax1, sharey=ax1)
-
-        # Improved titles with more information
-        refl_elevation = radar.elevation["data"][radar.get_slice(refl_sweep_index)].mean()
-        vel_elevation = radar.elevation["data"][radar.get_slice(vel_sweep_index)].mean()
-
-        titles = [
-            f"Reflectivity - {refl_elevation:.2f}° Tilt",
-            f"Corrected Velocity - {vel_elevation:.2f}° Tilt"
-        ]
-
-        # Set plot extent using the radar's actual location
-        radar_lat = radar.latitude["data"][0]
-        radar_lon = radar.longitude["data"][0]
-        half_width = 35
-        lat_deg, lon_deg = miles_to_degrees(half_width, radar_lat)
-        extent = [radar_lon - lon_deg, radar_lon + lon_deg,
-                  radar_lat - lat_deg, radar_lat + lat_deg]
-
-        # Use custom colormaps
-        try:
-            refl_cmap, refl_values = create_reflectivity_colormap()
-            vel_cmap, vel_values = create_velocity_colormap()
-        except:
-            refl_cmap = "NWSRef"
-            vel_cmap = "balance"
-
-        # Plot reflectivity
-        display.plot_ppi_map(
-            "reflectivity",
-            sweep=refl_sweep_index,
-            vmin=-32.0,
-            vmax=94.5,
-            ax=ax1,
-            projection=projection,
-            title=titles[0],
-            colorbar_label="Reflectivity (dBZ)",
-            cmap=refl_cmap,
-            resolution='50m'
-        )
-
-        # Plot velocity with proper field and range
-        vel_range = 127 if vel_field == "corrected_velocity_mph" else 65
-
-        display.plot_ppi_map(
-            vel_field,
-            sweep=vel_sweep_index,
-            vmin=-vel_range,
-            vmax=vel_range,
-            ax=ax2,
-            projection=projection,
-            title=titles[1],
-            colorbar_label="Velocity (MPH)" if vel_field == "corrected_velocity_mph" else "Velocity (m/s)",
-            cmap=vel_cmap,
-            resolution='50m'
-        )
-
-        # Enhanced main title
-        try:
-            base_time_str = radar.time["units"].split("since ")[1]
-            scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
-            main_title = f"{radar_id} - {scan_time.strftime('%B %d, %Y at %H:%M UTC')}"
-        except:
-            main_title = parse_filename_for_title(file_path)
-
-        plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
-
-        # Add attribution
-        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Improved with PyART",
-                 ha='center', fontsize=12, style='italic')
-
-        # Enhance both subplots with better geographic features
-        for ax in [ax1, ax2]:
-            ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3, zorder=0)
-            ax.add_feature(cfeature.COASTLINE, linewidth=0.8, color='black', zorder=2)
-            ax.add_feature(cfeature.STATES, linestyle="-", linewidth=0.5, color='darkgray', zorder=2)
-            ax.add_feature(cfeature.BORDERS, linewidth=0.8, color='black', zorder=2)
-
-            ax.set_extent(extent, crs=projection)
-
-            gl = ax.gridlines(crs=projection, draw_labels=True, linestyle=":",
-                              color="gray", alpha=0.7, linewidth=0.5)
-            gl.top_labels = gl.right_labels = False
-            gl.xformatter = LONGITUDE_FORMATTER
-            gl.yformatter = LATITUDE_FORMATTER
-
-            gl.xlocator = mticker.FixedLocator(
-                np.arange(np.floor(extent[0]), np.ceil(extent[1]) + 0.5, 0.5)
-            )
-            gl.ylocator = mticker.FixedLocator(
-                np.arange(np.floor(extent[2]), np.ceil(extent[3]) + 0.5, 0.5)
-            )
-
-            gl.xlabel_style = gl.ylabel_style = {'size': 11, 'color': 'black'}
-
-        plt.tight_layout(pad=2.0, h_pad=2.0, w_pad=2.0, rect=[0, 0.05, 1, 0.92])
-
-        return fig
-
-    except Exception as e:
-        st.error(f"Error plotting radar data: {str(e)}")
-        return None
-
-def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
-    """Basic radar plotting without CartoPy dependencies - FIXED VERSION."""
-    try:
-        # Use corrected_velocity if available, otherwise dealiased_velocity
-        vel_field = "corrected_velocity_mph" if "corrected_velocity_mph" in radar.fields else "dealiased_velocity"
-        
-        # Get radar data
-        refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
-        vel_data = radar.fields[vel_field]["data"][radar.get_slice(vel_sweep_index)]
-        
-        # Check for valid data
-        refl_valid = np.any(~np.ma.getmaskarray(refl_data))
-        vel_valid = np.any(~np.ma.getmaskarray(vel_data))
-        
-        if not refl_valid or not vel_valid:
-            return None
-        
-        # Get coordinate data
-        azimuth = radar.azimuth["data"][radar.get_slice(refl_sweep_index)]
-        ranges = radar.range["data"]
-        
-        # Convert to Cartesian coordinates
-        range_grid, azimuth_grid = np.meshgrid(ranges, azimuth)
-        x = range_grid * np.sin(np.deg2rad(azimuth_grid))
-        y = range_grid * np.cos(np.deg2rad(azimuth_grid))
-        
-        # Create plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
-        
-        # Use custom colormaps
-        try:
-            refl_cmap, _ = create_reflectivity_colormap()
-            vel_cmap, _ = create_velocity_colormap()
-        except:
-            refl_cmap = "jet"
-            vel_cmap = "RdBu_r"
-        
-        # Plot reflectivity
-        im1 = ax1.pcolormesh(x/1000, y/1000, refl_data, 
-                            vmin=-32.0,
-                            vmax=94.5,
-                            cmap=refl_cmap, shading='auto')
-        ax1.set_title(f"Reflectivity - {radar.elevation['data'][radar.get_slice(refl_sweep_index)].mean():.2f}° Tilt", fontsize=14)
-        ax1.set_xlabel('Distance East (km)')
-        ax1.set_ylabel('Distance North (km)')
-        ax1.set_aspect('equal')
-        plt.colorbar(im1, ax=ax1, label='Reflectivity (dBZ)')
-        
-        # Plot velocity with proper range
-        vel_range = 127 if vel_field == "corrected_velocity_mph" else 65
-        
-        im2 = ax2.pcolormesh(x/1000, y/1000, vel_data, 
-                            vmin=-vel_range, 
-                            vmax=vel_range, 
-                            cmap=vel_cmap, shading='auto')
-        ax2.set_title(f"Corrected Velocity - {radar.elevation['data'][radar.get_slice(vel_sweep_index)].mean():.2f}° Tilt", fontsize=14)
-        ax2.set_xlabel('Distance East (km)')
-        ax2.set_ylabel('Distance North (km)')
-        ax2.set_aspect('equal')
-        plt.colorbar(im2, ax=ax2, label='Velocity (MPH)' if vel_field == "corrected_velocity_mph" else 'Velocity (m/s)')
-        
-        # Enhanced main title
-        try:
-            base_time_str = radar.time["units"].split("since ")[1]
-            scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
-            radar_id = os.path.basename(file_path)[:4]
-            main_title = f"{radar_id} - {scan_time.strftime('%B %d, %Y at %H:%M UTC')}"
-        except:
-            main_title = parse_filename_for_title(file_path)
-
-        plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
-        
-        # Attribution
-        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Improved with PyART",
-                 ha='center', fontsize=12, style='italic')
-        
-        plt.tight_layout(pad=2.0, h_pad=2.0, w_pad=2.0, rect=[0, 0.05, 1, 0.92])
-        
-        return fig
-        
-    except Exception as e:
-        st.error(f"Error in basic radar plotting: {str(e)}")
-        return None
-
-def create_fallback_visualization(radar_id, radar_lat, radar_lon, filename):
-    """Create a fallback visualization when PyART/CartoPy aren't available."""
-    fig, ax = plt.subplots(figsize=(12, 8))
+    # Get radar coordinates
+    x, y = pyart.core.antenna_to_cartesian(
+        radar.range['data'],
+        radar.azimuth['data'][sweep_slice],
+        radar.elevation['data'][sweep_slice]
+    )
     
-    # Parse time from filename
-    try:
-        date_str = filename[4:12]
-        time_str = filename[13:19]
-        dt = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
-        time_formatted = dt.strftime("%B %d, %Y at %H:%M UTC")
-    except:
-        time_formatted = "Unknown Time"
+    # Convert to km
+    x = x / 1000.0
+    y = y / 1000.0
     
-    # Create coordinate system around radar location
-    extent = 2.0  # degrees
+    # Create the plot
+    fig = go.Figure()
     
-    ax.set_xlim(radar_lon - extent, radar_lon + extent)
-    ax.set_ylim(radar_lat - extent, radar_lat + extent)
+    # Add the radar data as a heatmap
+    fig.add_trace(go.Heatmap(
+        x=x[0, :],
+        y=y[:, 0],
+        z=field_data,
+        colorscale=color_scale,
+        zmin=vmin,
+        zmax=vmax,
+        showscale=True,
+        hovertemplate='<b>%{fullData.name}</b><br>' +
+                      'X: %{x:.1f} km<br>' +
+                      'Y: %{y:.1f} km<br>' +
+                      'Value: %{z:.1f}<br>' +
+                      '<extra></extra>',
+        name=title
+    ))
     
-    # Add grid
-    ax.grid(True, alpha=0.3)
+    # Add range rings if requested
+    if show_range_rings:
+        theta = np.linspace(0, 2*np.pi, 100)
+        ring_distances = np.arange(50, max_range + 1, 50)
+        for r in ring_distances:
+            x_ring = r * np.cos(theta)
+            y_ring = r * np.sin(theta)
+            fig.add_trace(go.Scatter(
+                x=x_ring, y=y_ring,
+                mode='lines',
+                line=dict(color='rgba(255,255,255,0.3)', width=1, dash='dash'),
+                showlegend=False,
+                hoverinfo='skip',
+                name=f'{r} km range'
+            ))
     
-    # Plot radar location
-    ax.plot(radar_lon, radar_lat, 'ro', markersize=15, label=f'{radar_id} Radar')
+    # Configure layout
+    fig.update_layout(
+        title=dict(
+            text=title,
+            x=0.5,
+            font=dict(size=16)
+        ),
+        xaxis=dict(
+            title='Distance East (km)',
+            range=[-max_range, max_range],
+            scaleanchor='y',
+            scaleratio=1,
+            showgrid=True,
+            gridcolor='rgba(255,255,255,0.1)'
+        ),
+        yaxis=dict(
+            title='Distance North (km)',
+            range=[-max_range, max_range],
+            showgrid=True,
+            gridcolor='rgba(255,255,255,0.1)'
+        ),
+        width=800,
+        height=800,
+        template='plotly_dark',
+        margin=dict(l=50, r=50, t=80, b=50)
+    )
     
-    # Add range rings
-    for radius_miles in [50, 100, 150, 200]:
-        radius_deg = radius_miles / 69.0
-        circle = plt.Circle((radar_lon, radar_lat), radius_deg, 
-                          fill=False, color='gray', alpha=0.5, linestyle='--')
-        ax.add_patch(circle)
-        ax.text(radar_lon + radius_deg, radar_lat, f'{radius_miles} mi', 
-               fontsize=8, alpha=0.7)
-    
-    # Labels and title
-    ax.set_xlabel('Longitude')
-    ax.set_ylabel('Latitude')
-    ax.set_title(f'{radar_id} NEXRAD Station\n{time_formatted}', fontsize=14, fontweight='bold')
-    ax.legend()
-    
-    # Add info text
-    info_text = f"""
-Station: {radar_id}
-Location: {radar_lat:.3f}°N, {radar_lon:.3f}°W
-File: {filename}
-
-Radar data file is available for download.
-Full radar processing requires PyART and CartoPy.
-    """
-    
-    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=10,
-           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-    
-    fig.text(0.5, 0.02, "NEXRAD Data Viewer | Data from NOAA/National Weather Service",
-             ha='center', fontsize=10, style='italic')
-    
-    plt.tight_layout()
     return fig
 
-def process_radar_file_robust(file_url, filename, radar_lat, radar_lon):
-    """Process radar file with robust error handling and fallbacks - UPDATED."""
-    if not PYART_AVAILABLE:
-        st.warning("PyART not available - showing basic radar information instead.")
-        return create_fallback_visualization(
-            filename[:4], radar_lat, radar_lon, filename
-        )
+# Streamlit App
+def main():
+    st.title("NEXRAD Radar Data Viewer")
+    st.markdown("Upload a NEXRAD Level II file to visualize reflectivity and velocity data with interactive zooming.")
     
-    temp_path = None
-    try:
-        # Download file
-        temp_path = download_radar_file(file_url)
-        
-        # Read radar data
-        radar = pyart.io.read(temp_path)
-
-        if "reflectivity" not in radar.fields or "velocity" not in radar.fields:
-            raise Exception("Required fields missing in radar file.")
-
-        # Find best sweeps using improved logic
-        refl_sweep = find_best_sweep(radar, 'reflectivity')
-        vel_sweep = find_best_sweep(radar, 'velocity')
-
-        print(f"Using reflectivity sweep: {refl_sweep}")
-        print(f"Using velocity sweep: {vel_sweep}")
-
-        # Perform velocity dealiasing with improved method
-        simple_improved_dealias_velocity(radar, vel_sweep)
-
-        # Create plot based on available dependencies
-        if CARTOPY_AVAILABLE:
-            fig = plot_radar_data(
-                radar, refl_sweep, vel_sweep,
-                filename, radar_lat, radar_lon
-            )
-        else:
-            # Use matplotlib-only plotting
-            fig = plot_radar_data_basic(
-                radar, refl_sweep, vel_sweep,
-                filename, radar_lat, radar_lon
-            )
-
-        return fig
-
-    except Exception as e:
-        st.error(f"Error processing radar file: {str(e)}")
-        return create_fallback_visualization(
-            filename[:4], radar_lat, radar_lon, filename
-        )
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
-        if 'radar' in locals():
-            del radar
-        gc.collect()
-
-# Streamlit UI
-st.title("NEXRAD Radar Data Viewer")
-st.markdown("### High-Resolution Weather Radar Imagery")
-
-st.markdown("""
-Access NEXRAD radar data from the National Weather Service. Select a date and radar station 
-to view reflectivity and velocity data with professional-quality visualization.
-""")
-
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    st.subheader("Select Date & Location")
-    
-    # Date selection
-    today = datetime.now().date()
-    min_date = datetime(1991, 6, 1).date()  # NEXRAD started operation
-    
-    date_input = st.date_input(
-        "Date", value=today, min_value=min_date, max_value=today)
-    
-    # Location selection
-    location_method = st.radio(
-        "Location Selection",
-        ["Search by City/Place", "Select Radar Station"])
-    
-    if location_method == "Search by City/Place":
-        location_input = st.text_input(
-            "Enter city or place name",
-            placeholder="e.g., Miami, Los Angeles, Chicago")
-        
-        radar_options = []
-        selected_radar = None
-        
-        if location_input:
-            with st.spinner("Finding nearby radars..."):
-                try:
-                    lat, lon = get_location_coordinates(location_input)
-                    if lat and lon:
-                        st.success(f"Found: {lat:.4f}°, {lon:.4f}°")
-                        nearby_radars = get_closest_radars(lat, lon)
-                        if nearby_radars:
-                            radar_options = [(f"{r[0]} ({r[1]:.0f} miles)", r[0], r[2], r[3]) for r in nearby_radars[:10]]
-                        else:
-                            st.warning("No radars found within 230 miles of this location.")
-                    else:
-                        st.error("Location not found. Please try a different name.")
-                except Exception as e:
-                    st.error(f"Error geocoding location: {str(e)}")
-    else:
-        # Direct radar selection
-        radar_dict = {f"{r[0]} - {r[1]:.2f}°N, {r[2]:.2f}°W": (r[0], r[1], r[2]) for r in RADAR_LIST}
-        radar_options = [(k, v[0], v[1], v[2]) for k, v in radar_dict.items()]
-    
-    # Radar selection dropdown
-    if radar_options:
-        selected_option = st.selectbox(
-            "Select Radar Station",
-            options=[opt[0] for opt in radar_options],
-            key="radar_select")
-        
-        if selected_option:
-            selected_radar = next(opt for opt in radar_options if opt[0] == selected_option)
-            radar_id, radar_lat, radar_lon = selected_radar[1], selected_radar[2], selected_radar[3]
-            
-            # Get available files for selected date and radar
-            if date_input:
-                with st.spinner("Loading available radar times..."):
-                    file_times = get_nexrad_files_for_date(radar_id, date_input)
-                
-                if file_times:
-                    st.success(f"Found {len(file_times)} radar scans")
-                    
-                    # Time selection
-                    time_options = []
-                    for file_time, url, filename in file_times:
-                        time_str = file_time.strftime("%H:%M:%S UTC")
-                        time_options.append((time_str, url, filename))
-                    
-                    selected_time = st.selectbox(
-                        "Select Radar Scan Time",
-                        options=[opt[0] for opt in time_options],
-                        key="time_select")
-                    
-                    if selected_time:
-                        selected_file = next(opt for opt in time_options if opt[0] == selected_time)
-                        file_url = selected_file[1]
-                        filename = selected_file[2]
-                        
-                        generate_button = st.button("Generate Radar Plot", type="primary")
-                        
-                        if generate_button:
-                            with col2:
-                                st.subheader("Radar Visualization")
-                                with st.spinner("Processing radar data... This may take 2-3 minutes."):
-                                    try:
-                                        fig = process_radar_file_robust(file_url, filename, radar_lat, radar_lon)
-                                        
-                                        if fig:
-                                            st.pyplot(fig, use_container_width=True)
-                                            plt.close(fig)
-                                            gc.collect()
-                                            
-                                            if all(dependency_status.values()):
-                                                st.success("Full radar plot generated successfully!")
-                                            else:
-                                                st.info("Basic radar information displayed. Install PyART and CartoPy for full functionality.")
-                                            
-                                            st.info("Right-click on the image to save it to your device.")
-                                        else:
-                                            st.error("Failed to generate radar plot.")
-                                            
-                                    except Exception as e:
-                                        st.error(f"Error generating radar plot: {str(e)}")
-                                        
-                                        # Show fallback
-                                        st.info("Showing basic radar station information instead:")
-                                        fallback_fig = create_fallback_visualization(radar_id, radar_lat, radar_lon, filename)
-                                        st.pyplot(fallback_fig, use_container_width=True)
-                                        plt.close(fallback_fig)
-                else:
-                    st.warning(f"No radar data available for {radar_id} on {date_input}")
-
-with col2:
-    st.subheader("Radar Visualization")
-    if not st.session_state.get('radar_select') or not st.session_state.get('time_select'):
-        st.info("Select a radar station and time to generate the plot.")
-        
-        # Information about radar data
+    # Add info about the app
+    with st.expander("About this application"):
         st.markdown("""
-        **About NEXRAD Radar Data:**
+        This application processes NEXRAD Level II radar data files and creates interactive visualizations of:
+        - **Reflectivity data**: Shows precipitation intensity (dBZ scale)
+        - **Velocity data**: Shows radial wind speeds with advanced dealiasing (MPH scale)
         
-        - **Reflectivity**: Shows precipitation intensity (dBZ scale)
-        - **Velocity**: Shows wind movement toward/away from radar (m/s)
-        - **Range**: Covers approximately 230-mile radius from each radar
-        - **Resolution**: High-resolution data available from 2008+
-        - **Updates**: New scans every 4-10 minutes during active weather
+        **Supported file formats**: .gz, .ar2v, .Z
         
-        The system automatically pairs reflectivity and velocity data from the 
-        closest available scan times and applies velocity dealiasing for accurate 
-        wind measurements.
+        **Features**:
+        - Automatic radar station detection from filename
+        - Advanced velocity dealiasing for high-resolution data
+        - Interactive zoom and pan capabilities
+        - Custom meteorological color scales
+        
+        **File naming convention**: KXXXYYYYMMDDHHMMSS (e.g., KHTX20240315123000.gz)
         """)
 
-# Information section
-with st.expander("NEXRAD Radar Network Information"):
-    st.markdown("""
-    The **Next Generation Weather Radar (NEXRAD)** network consists of 160+ weather radar stations 
-    across the United States, providing comprehensive weather monitoring capability.
-    
-    **Technical Specifications:**
-    - **Frequency**: S-band (2.7-3.0 GHz)
-    - **Range**: 230 nautical miles (460 km) maximum
-    - **Resolution**: 250m range resolution, 0.5° beam width
-    - **Products**: Reflectivity, velocity, spectrum width, and derived products
-    
-    **Data Quality Features:**
-    - Dual-polarization capability (2013+ upgrades)
-    - Velocity dealiasing for accurate wind measurements  
-    - Automated quality control and clutter filtering
-    - Super-resolution mode for enhanced detail
-    
-    **Coverage Areas:**
-    - Continental United States
-    - Alaska, Hawaii, and Puerto Rico
-    - Selected overseas military installations
-    
-    Data is provided by the National Weather Service and archived by NOAA.
-    """)
+    # Sidebar for controls
+    with st.sidebar:
+        st.header("Controls")
+        
+        # File upload with better help text
+        uploaded_file = st.file_uploader(
+            "Choose NEXRAD file",
+            type=['gz', 'ar2v', 'Z'],
+            help="Upload NEXRAD Level II files. Maximum file size: 200MB"
+        )
+        
+        # Display mode selection
+        display_mode = st.radio(
+            "Display Mode",
+            ["Reflectivity", "Velocity", "Both"],
+            index=0,
+            help="Choose which radar products to display"
+        )
+        
+        # Advanced options
+        with st.expander("Advanced Options"):
+            max_range = st.slider("Maximum Range (km)", 50, 300, 250, 25)
+            show_range_rings = st.checkbox("Show Range Rings", True)
 
-with st.expander("How to Read Radar Data"):
-    st.markdown("""
-    **Reflectivity (Left Panel):**
-    - **Green/Blue**: Light precipitation (drizzle, light rain)
-    - **Yellow**: Moderate precipitation  
-    - **Orange/Red**: Heavy precipitation
-    - **Purple/Magenta**: Very heavy precipitation or hail
+    if uploaded_file is not None:
+        try:
+            # Parse filename for radar info
+            file_info = parse_nexrad_filename(uploaded_file.name)
+            
+            if file_info:
+                st.sidebar.success("File Information Detected")
+                st.sidebar.write(f"**Radar Station:** {file_info['radar_id']}")
+                st.sidebar.write(f"**Location:** {file_info['station_info']['name']}")
+                st.sidebar.write(f"**Date/Time:** {file_info['datetime'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                st.sidebar.write(f"**Coordinates:** {file_info['station_info']['lat']:.3f}°N, {file_info['station_info']['lon']:.3f}°W")
+            else:
+                st.sidebar.warning("Could not parse filename for radar information")
+            
+            # Save uploaded file to temporary location
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.gz') as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_file_path = tmp_file.name
+            
+            # Load radar data
+            with st.spinner("Loading radar data..."):
+                radar = pyart.io.read_nexrad_archive(tmp_file_path)
+            
+            # Clean up temp file
+            os.unlink(tmp_file_path)
+            
+            # Display available fields
+            st.sidebar.write("**Available Fields:**")
+            for field in radar.fields.keys():
+                st.sidebar.write(f"- {field}")
+            
+            # Check for required fields
+            has_reflectivity = 'reflectivity' in radar.fields
+            has_velocity = 'velocity' in radar.fields
+            
+            if not has_reflectivity:
+                st.error("Reflectivity field not found in radar data.")
+                return
+            
+            # Find best sweeps
+            refl_sweep = find_best_sweep(radar, 'reflectivity')
+            vel_sweep = find_best_sweep(radar, 'velocity') if has_velocity else 0
+            
+            # Detect data age and process velocity
+            data_age = detect_data_age(radar)
+            st.sidebar.write(f"**Data Type:** {data_age.upper()}")
+            
+            dealiased_available = False
+            
+            if has_velocity:
+                with st.spinner("Processing velocity data..."):
+                    if data_age == "new":
+                        success = advanced_velocity_dealiasing_new_data(radar, vel_sweep)
+                        if not success:
+                            success = simple_velocity_dealiasing_old_data(radar, vel_sweep)
+                    else:
+                        success = simple_velocity_dealiasing_old_data(radar, vel_sweep)
+                    
+                    if success:
+                        dealiased_available = True
+                        # Convert to MPH
+                        velocity_mph = radar.fields["corrected_velocity"].copy()
+                        velocity_mph['data'] = velocity_mph['data'] * 2.237
+                        velocity_mph['units'] = 'MPH'
+                        radar.add_field("corrected_velocity_mph", velocity_mph, replace_existing=True)
+                    else:
+                        st.warning("Using original velocity data")
+                        radar.add_field("corrected_velocity", radar.fields["velocity"], replace_existing=True)
+                        velocity_mph = radar.fields["corrected_velocity"].copy()
+                        velocity_mph['data'] = velocity_mph['data'] * 2.237
+                        velocity_mph['units'] = 'MPH'
+                        radar.add_field("corrected_velocity_mph", velocity_mph, replace_existing=True)
+                        dealiased_available = True
+            
+            # Create colormaps
+            dbz_values, refl_colors = create_custom_reflectivity_colormap()
+            vel_values, vel_colors = create_custom_velocity_colormap()
+            
+            # Convert to Plotly colorscales
+            refl_colorscale = [[i/(len(refl_colors)-1), f'rgb({r},{g},{b})'] for i, (r, g, b) in enumerate(refl_colors)]
+            vel_colorscale = [[i/(len(vel_colors)-1), f'rgb({r},{g},{b})'] for i, (r, g, b) in enumerate(vel_colors)]
+            
+            # Display plots based on mode
+            if display_mode == "Reflectivity" or display_mode == "Both":
+                st.subheader(f"Reflectivity (Sweep {refl_sweep}) - {data_age.upper()} Data")
+                
+                with st.spinner("Generating reflectivity plot..."):
+                    refl_fig = create_plotly_radar_plot(
+                        radar, 'reflectivity', refl_sweep,
+                        f"NEXRAD Reflectivity (Sweep {refl_sweep}) - dBZ",
+                        refl_colorscale, -32, 94.5, max_range, show_range_rings
+                    )
+                    st.plotly_chart(refl_fig, use_container_width=True)
+                
+                # Show statistics
+                sweep_slice = radar.get_slice(refl_sweep)
+                refl_data = radar.fields['reflectivity']['data'][sweep_slice]
+                valid_data = refl_data[~refl_data.mask] if hasattr(refl_data, 'mask') else refl_data
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Max dBZ", f"{valid_data.max():.1f}")
+                with col2:
+                    st.metric("Mean dBZ", f"{valid_data.mean():.1f}")
+                with col3:
+                    st.metric("Min dBZ", f"{valid_data.min():.1f}")
+                with col4:
+                    st.metric("Valid Gates", f"{len(valid_data):,}")
+            
+            if (display_mode == "Velocity" or display_mode == "Both") and has_velocity and dealiased_available:
+                st.subheader(f"Dealiased Velocity (Sweep {vel_sweep}) - {data_age.upper()} Data")
+                
+                with st.spinner("Generating velocity plot..."):
+                    vel_fig = create_plotly_radar_plot(
+                        radar, 'corrected_velocity_mph', vel_sweep,
+                        f"Dealiased Velocity (Sweep {vel_sweep}) - MPH",
+                        vel_colorscale, -127, 127, max_range, show_range_rings
+                    )
+                    st.plotly_chart(vel_fig, use_container_width=True)
+                
+                # Show velocity statistics
+                sweep_slice = radar.get_slice(vel_sweep)
+                vel_data = radar.fields['corrected_velocity_mph']['data'][sweep_slice]
+                valid_data = vel_data[~vel_data.mask] if hasattr(vel_data, 'mask') else vel_data
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Max Velocity", f"{valid_data.max():.1f} MPH")
+                with col2:
+                    st.metric("Mean Velocity", f"{valid_data.mean():.1f} MPH")
+                with col3:
+                    st.metric("Min Velocity", f"{valid_data.min():.1f} MPH")
+                with col4:
+                    st.metric("Valid Gates", f"{len(valid_data):,}")
+                    
+            elif display_mode == "Velocity" or display_mode == "Both":
+                st.warning("Velocity data not available or processing failed.")
+                
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
+            with st.expander("Show detailed error information"):
+                st.code(traceback.format_exc())
     
-    **Velocity (Right Panel):**
-    - **Green colors**: Motion toward the radar
-    - **Red colors**: Motion away from the radar
-    - **Adjacent red/green**: Indicates rotation (possible tornado)
-    - **Speed**: Measured in meters per second (m/s)
-    
-    **Understanding the Display:**
-    - Radar beam travels in straight lines but Earth curves
-    - Higher altitudes sampled at greater distances
-    - Beam blockage may occur near mountains or tall structures
-    - Range rings help estimate distance from radar site
-    """)
+    else:
+        st.info("Please upload a NEXRAD Level II file to begin.")
+        
+        # Show example of expected filename format
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            ### Expected File Format
+            NEXRAD Level II files should follow the naming convention:
+            - **Format:** `KXXXYYYYMMDDHHMMSS.gz` (or .ar2v, .Z)
+            - **Example:** `KHTX20240315123000.gz`
+            - **Where:**
+              - `KXXX` = Radar station ID (e.g., KHTX)
+              - `YYYY` = Year (e.g., 2024)
+              - `MM` = Month (e.g., 03)
+              - `DD` = Day (e.g., 15)
+              - `HH` = Hour (e.g., 12)
+              - `MM` = Minute (e.g., 30)
+              - `SS` = Second (e.g., 00)
+            """)
+        
+        with col2:
+            st.markdown("""
+            ### Sample Radar Stations
+            - **KHTX** - Huntsville, AL
+            - **KBMX** - Birmingham, AL
+            - **KFFC** - Atlanta, GA
+            - **KJAX** - Jacksonville, FL
+            - **KTLX** - Norman, OK
+            - **KDDC** - Dodge City, KS
+            - **KLOT** - Chicago, IL
+            - **KPBZ** - Pittsburgh, PA
+            
+            *Data files can be downloaded from NOAA's NEXRAD archive.*
+            """)
+        
+        # Add footer with technical info
+        st.markdown("---")
+        st.markdown("""
+        **Technical Information:**
+        - Supports both high-resolution (post-2008) and low-resolution (pre-2008) data
+        - Advanced velocity dealiasing with tornadic signature detection
+        - Custom meteorological color scales for accurate interpretation
+        - Built with PyART, Plotly, and Streamlit
+        """)
 
-st.markdown("---")
-st.markdown("*Created by Sekai Chandra (@Sekai_WX) | Data from NOAA/National Weather Service*")
+if __name__ == "__main__":
+    main()
