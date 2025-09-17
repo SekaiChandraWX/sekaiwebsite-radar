@@ -373,118 +373,311 @@ def create_velocity_colormap():
     colors = [(r / 255, g / 255, b / 255) for _, r, g, b in color_data]
     return ListedColormap(colors, name="custom_velocity"), mps_values
 
-def get_sweep_info(radar, target_elevation=0.5, tolerance=0.3):
-    """Get information about sweeps with valid data near target elevation."""
+def detect_data_age(radar):
+    """Detect if radar data is old (low-res) or new (high-res) based on the original check_resolution logic."""
     try:
-        sweep_starts = radar.sweep_start_ray_index["data"]
-        sweep_ends = radar.sweep_end_ray_index["data"]
-        time_data = radar.time["data"]
-        base_time = datetime.strptime(radar.time["units"].split("since ")[1], "%Y-%m-%dT%H:%M:%SZ")
-        elevations = np.array(
-            [radar.elevation["data"][start:end + 1].mean() for start, end in zip(sweep_starts, sweep_ends)])
-        mean_times = np.array([time_data[start:end + 1].mean() for start, end in zip(sweep_starts, sweep_ends)])
-        valid_sweeps = np.abs(elevations - target_elevation) <= tolerance
+        sweep_index = 0
+        sweep_slice = radar.get_slice(sweep_index)
 
-        sweep_info = []
-        for i in np.where(valid_sweeps)[0]:
-            sweep_type = []
-            elevation = elevations[i]
-            
-            # Check reflectivity
-            refl_valid = False
-            if "reflectivity" in radar.fields:
-                refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(i)]
-                refl_valid = np.any(~np.ma.getmaskarray(refl_data) & ~np.isnan(refl_data))
-                if refl_valid:
-                    sweep_type.append("reflectivity")
+        # Use velocity field to check data shape (as in original)
+        if 'velocity' in radar.fields:
+            data_shape = radar.fields["velocity"]["data"][sweep_slice].shape
+        elif 'reflectivity' in radar.fields:
+            data_shape = radar.fields["reflectivity"]["data"][sweep_slice].shape
+        else:
+            return "new"  # Default to new if can't determine
 
-            # Check velocity
-            vel_valid = False
-            if "velocity" in radar.fields:
-                vel_data = radar.fields["velocity"]["data"][radar.get_slice(i)]
-                vel_valid = np.any(~np.ma.getmaskarray(vel_data) & ~np.isnan(vel_data))
-                if vel_valid:
-                    sweep_type.append("velocity")
+        total_gates = data_shape[0] * data_shape[1]
 
-            if sweep_type:
-                sweep_time = base_time + timedelta(seconds=int(mean_times[i]))
-                sweep_info.append({
-                    "sweep_index": i,
-                    "time": sweep_time,
-                    "type": sweep_type,
-                    "elevation": elevations[i]
-                })
-        return sweep_info
+        # Check base year
+        base_year = None
+        try:
+            base_time_str = radar.time["units"].split("since ")[1]
+            base_year = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ").year
+        except Exception:
+            base_year = None
+
+        # Check super resolution flag
+        is_super_res = radar.instrument_parameters.get("super_resolution", {}).get("data", [0])[0] == 1
+
+        # Apply original logic: if year < 2008, it's old (low-res)
+        if base_year is not None and base_year < 2008:
+            return "old"
+
+        # Gate threshold from original: 1,000,000
+        gate_threshold = 1000000
+
+        # If high gate count OR super resolution, it's new (high-res)
+        if total_gates >= gate_threshold or is_super_res:
+            return "new"
+        else:
+            return "old"
+
     except Exception as e:
-        return []
+        print(f"Debug: Error detecting data age: {e}, defaulting to new")
+        return "new"
 
-def pair_sweeps(sweep_info, max_time_diff=30, is_high_res=True):
-    """Pair reflectivity and velocity sweeps within max_time_diff seconds."""
-    refl_sweeps = [s for s in sweep_info if "reflectivity" in s["type"]]
-    vel_sweeps = [s for s in sweep_info if "velocity" in s["type"]]
+def find_best_sweep(radar, field_name):
+    """Find sweep with most valid data points."""
+    best_sweep = 0
+    max_valid = 0
+    
+    for sweep_idx in range(radar.nsweeps):
+        try:
+            sweep_slice = radar.get_slice(sweep_idx)
+            field_data = radar.fields[field_name]['data'][sweep_slice]
+            valid_points = (~field_data.mask).sum() if hasattr(field_data, 'mask') else len(field_data.flatten())
+            
+            if valid_points > max_valid:
+                max_valid = valid_points
+                best_sweep = sweep_idx
+                
+            # If we find a sweep with lots of valid data, use it
+            if valid_points > 1000:
+                return sweep_idx
+                
+        except Exception as e:
+            continue
+            
+    return best_sweep
 
-    effective_time_diff = max_time_diff if is_high_res else 60
-
-    pairs = []
-    used_vel = set()
-    for refl in refl_sweeps:
-        min_diff = float("inf")
-        closest_vel = None
-        refl_time = refl["time"]
-        
-        # Prefer velocity sweep with index 1 if available and within time diff
-        for vel in vel_sweeps:
-            if vel["sweep_index"] == 1 and vel["sweep_index"] not in used_vel:
-                time_diff = abs((vel["time"] - refl_time).total_seconds())
-                if time_diff <= effective_time_diff and time_diff < min_diff:
-                    min_diff = time_diff
-                    closest_vel = vel
-        
-        # If no sweep 1, try any velocity sweep
-        if not closest_vel:
-            for vel in vel_sweeps:
-                if vel["sweep_index"] in used_vel:
-                    continue
-                time_diff = abs((vel["time"] - refl_time).total_seconds())
-                if time_diff <= effective_time_diff and time_diff < min_diff:
-                    min_diff = time_diff
-                    closest_vel = vel
-                    
-        if closest_vel:
-            pairs.append((refl, closest_vel))
-            used_vel.add(closest_vel["sweep_index"])
-
-    # Fallback: If no pairs found and both sweep types exist, pair closest sweeps
-    if not pairs and refl_sweeps and vel_sweeps:
-        refl = min(refl_sweeps, key=lambda s: abs((s["time"] - refl_sweeps[0]["time"]).total_seconds()))
-        vel = min(vel_sweeps, key=lambda s: abs((s["time"] - refl["time"]).total_seconds()))
-        pairs.append((refl, vel))
-
-    return pairs
-
-def simple_improved_dealias_velocity(radar, vel_sweep_index):
-    """Simple but effective velocity dealiasing."""
+def advanced_velocity_dealiasing_new_data(radar, vel_sweep):
+    """Advanced dealiasing for new data with tornadic signature handling."""
     try:
-        nyquist_vel = 28.0
-        if "nyquist_velocity" in radar.instrument_parameters:
-            nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
-            if len(nyq_data) > 0:
-                nyquist_vel = nyq_data[0]
+        print("Debug: Applying advanced dealiasing for new data...")
 
-        dealiased_vel = pyart.correct.dealias_region_based(
+        # Get Nyquist velocity
+        nyq = 28.0
+        if 'nyquist_velocity' in radar.instrument_parameters:
+            nyq_data = radar.instrument_parameters['nyquist_velocity']['data']
+            sweep_slice = radar.get_slice(vel_sweep)
+            if len(nyq_data) > 0:
+                if len(nyq_data) > sweep_slice.start:
+                    nyq_temp = nyq_data[sweep_slice.start]
+                else:
+                    nyq_temp = nyq_data[0]
+                if nyq_temp > 0 and nyq_temp < 100:
+                    nyq = float(nyq_temp)
+
+        print(f"Debug: Using Nyquist velocity: {nyq} m/s")
+
+        # Calculate velocity texture
+        print("Debug: Calculating velocity texture...")
+        vel_texture = pyart.retrieve.calculate_velocity_texture(radar, vel_field='velocity')
+        radar.add_field('vel_texture', vel_texture, replace_existing=True)
+
+        # Create gate filter for non-tornadic areas
+        print("Debug: Creating gate filter for non-tornadic areas...")
+        gfilter_nontornadic = pyart.filters.GateFilter(radar)
+        gfilter_nontornadic.exclude_above('vel_texture', 5)
+
+        # Dealias non-tornadic velocity field
+        print("Debug: Dealiasing non-tornadic velocity field...")
+        corrected_vel_nontornadic = pyart.correct.dealias_region_based(
             radar,
             vel_field="velocity",
-            nyquist_vel=nyquist_vel,
+            nyquist_vel=nyq,
+            gatefilter=gfilter_nontornadic
+        )
+        radar.add_field('dealiased_nontornadic', corrected_vel_nontornadic, replace_existing=True)
+
+        # Create gate filter for tornadic signatures
+        print("Debug: Creating gate filter for tornadic signatures...")
+        gfilter_tornadic = pyart.filters.GateFilter(radar)
+        gfilter_tornadic.exclude_below('reflectivity', 30)
+        gfilter_tornadic.exclude_below('vel_texture', 5)
+
+        # Dealias tornadic signatures
+        print("Debug: Dealiasing tornadic signatures...")
+        corrected_vel_temp = pyart.correct.dealias_region_based(
+            radar,
+            vel_field="velocity",
+            nyquist_vel=nyq
+        )
+        radar.add_field('temp_dealiased_velocity', corrected_vel_temp, replace_existing=True)
+
+        # Apply phase unwrapping to tornadic areas
+        print("Debug: Applying phase unwrapping to tornadic areas...")
+        corrected_vel_tornadic = pyart.correct.dealias_unwrap_phase(
+            radar,
+            vel_field='temp_dealiased_velocity',
+            gatefilter=gfilter_tornadic
+        )
+        radar.add_field('dealiased_tornadic', corrected_vel_tornadic, replace_existing=True)
+
+        # Combine dealiased fields
+        print("Debug: Combining dealiased fields...")
+        nontornadic = radar.fields['dealiased_nontornadic']['data']
+        tornadic = radar.fields['dealiased_tornadic']['data']
+
+        dealiased = np.ma.masked_invalid(nontornadic)
+        dealiased = np.ma.where(dealiased.mask, tornadic, dealiased)
+        radar.add_field_like('dealiased_nontornadic', 'corrected_velocity', dealiased)
+
+        print("Debug: Advanced velocity dealiasing completed successfully!")
+        return True
+
+    except Exception as e:
+        print(f"Debug: Advanced dealiasing failed: {e}")
+        return False
+
+def simple_velocity_dealiasing_old_data(radar, vel_sweep):
+    """Simple dealiasing for old data without tornadic signature handling."""
+    try:
+        print("Debug: Applying simple dealiasing for old data...")
+
+        # Get Nyquist velocity
+        nyq = 28.0
+        if 'nyquist_velocity' in radar.instrument_parameters:
+            nyq_data = radar.instrument_parameters['nyquist_velocity']['data']
+            sweep_slice = radar.get_slice(vel_sweep)
+            if len(nyq_data) > 0:
+                if len(nyq_data) > sweep_slice.start:
+                    nyq_temp = nyq_data[sweep_slice.start]
+                else:
+                    nyq_temp = nyq_data[0]
+                if nyq_temp > 0 and nyq_temp < 100:
+                    nyq = float(nyq_temp)
+
+        print(f"Debug: Using Nyquist velocity: {nyq} m/s")
+
+        # Simple region-based dealiasing
+        print("Debug: Applying simple region-based dealiasing...")
+        velocity_dealiased = pyart.correct.dealias_region_based(
+            radar,
+            vel_field="velocity",
+            nyquist_vel=nyq,
             centered=True,
             keep_original=True,
             gatefilter=False
         )
 
-        radar.add_field("dealiased_velocity", dealiased_vel, replace_existing=True)
-        radar.fields["dealiased_velocity"]["units"] = "m/s"
+        radar.add_field("corrected_velocity", velocity_dealiased, replace_existing=True)
+        radar.fields["corrected_velocity"]["units"] = "m/s"
+
+        print("Debug: Simple velocity dealiasing completed successfully!")
+        return True
 
     except Exception as e:
-        radar.add_field("dealiased_velocity", radar.fields["velocity"], replace_existing=True)
+        print(f"Debug: Simple dealiasing failed: {e}")
+        return False
+
+def get_sweep_info(radar, target_elevation=0.5, tolerance=0.3):
+    """Get information about sweeps with valid data near target elevation - UPDATED."""
+    try:
+        # Find best sweeps for each field
+        refl_sweep = find_best_sweep(radar, 'reflectivity') if 'reflectivity' in radar.fields else 0
+        vel_sweep = find_best_sweep(radar, 'velocity') if 'velocity' in radar.fields else 0
+        
+        sweep_info = []
+        
+        # Add reflectivity sweep info
+        if 'reflectivity' in radar.fields:
+            try:
+                base_time_str = radar.time["units"].split("since ")[1]
+                base_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
+                sweep_time = base_time + timedelta(seconds=int(radar.time["data"][radar.get_slice(refl_sweep).start]))
+                elevation = radar.elevation["data"][radar.get_slice(refl_sweep)].mean()
+                
+                sweep_info.append({
+                    "sweep_index": refl_sweep,
+                    "time": sweep_time,
+                    "type": ["reflectivity"],
+                    "elevation": elevation
+                })
+            except:
+                sweep_info.append({
+                    "sweep_index": refl_sweep,
+                    "time": datetime.now(),
+                    "type": ["reflectivity"],
+                    "elevation": 0.5
+                })
+        
+        # Add velocity sweep info
+        if 'velocity' in radar.fields:
+            try:
+                base_time_str = radar.time["units"].split("since ")[1]
+                base_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
+                sweep_time = base_time + timedelta(seconds=int(radar.time["data"][radar.get_slice(vel_sweep).start]))
+                elevation = radar.elevation["data"][radar.get_slice(vel_sweep)].mean()
+                
+                sweep_info.append({
+                    "sweep_index": vel_sweep,
+                    "time": sweep_time,
+                    "type": ["velocity"],
+                    "elevation": elevation
+                })
+            except:
+                sweep_info.append({
+                    "sweep_index": vel_sweep,
+                    "time": datetime.now(),
+                    "type": ["velocity"],
+                    "elevation": 0.5
+                })
+        
+        return sweep_info
+    except Exception as e:
+        return []
+
+def pair_sweeps(sweep_info, max_time_diff=30, is_high_res=True):
+    """Pair reflectivity and velocity sweeps - UPDATED."""
+    refl_sweeps = [s for s in sweep_info if "reflectivity" in s["type"]]
+    vel_sweeps = [s for s in sweep_info if "velocity" in s["type"]]
+
+    pairs = []
+    
+    if refl_sweeps and vel_sweeps:
+        # Just pair the first (best) sweep of each type
+        pairs.append((refl_sweeps[0], vel_sweeps[0]))
+
+    return pairs
+
+def simple_improved_dealias_velocity(radar, vel_sweep_index):
+    """Improved velocity dealiasing using data age detection."""
+    try:
+        # Detect data age
+        data_age = detect_data_age(radar)
+        print(f"Debug: Detected {data_age} radar data")
+
+        dealiased_success = False
+
+        if data_age == "new":
+            # Use advanced dealiasing for new data
+            success = advanced_velocity_dealiasing_new_data(radar, vel_sweep_index)
+            if success:
+                dealiased_success = True
+            else:
+                # Fallback to simple method
+                print("Debug: Falling back to simple dealiasing...")
+                success = simple_velocity_dealiasing_old_data(radar, vel_sweep_index)
+                dealiased_success = success
+        else:
+            # Use simple dealiasing for old data
+            success = simple_velocity_dealiasing_old_data(radar, vel_sweep_index)
+            dealiased_success = success
+
+        if not dealiased_success:
+            print("Debug: Using original velocity data as final fallback...")
+            radar.add_field("corrected_velocity", radar.fields["velocity"], replace_existing=True)
+            dealiased_success = True
+
+        # Convert to mph for better visualization
+        if dealiased_success and "corrected_velocity" in radar.fields:
+            print("Converting velocity from m/s to MPH...")
+            velocity_mph = radar.fields["corrected_velocity"].copy()
+            velocity_mph['data'] = velocity_mph['data'] * 2.237
+            velocity_mph['units'] = 'MPH'
+            radar.add_field("corrected_velocity_mph", velocity_mph, replace_existing=True)
+            
+            # Also add the original field name for compatibility
+            radar.add_field("dealiased_velocity", radar.fields["corrected_velocity"], replace_existing=True)
+
+    except Exception as e:
+        st.error(f"Error in velocity dealiasing: {e}")
+        # Final fallback
+        if "velocity" in radar.fields:
+            radar.add_field("dealiased_velocity", radar.fields["velocity"], replace_existing=True)
+            radar.add_field("corrected_velocity", radar.fields["velocity"], replace_existing=True)
 
 def parse_filename_for_title(file_path):
     """Parse filename to create plot title."""
@@ -498,30 +691,14 @@ def parse_filename_for_title(file_path):
     return f"{radar_id} data for {date_formatted} at {time_formatted} UTC"
 
 def check_resolution(radar):
-    """Determine if radar file is low-res or high-res based on year and gate count."""
-    try:
-        sweep_index = 0
-        sweep_slice = radar.get_slice(sweep_index)
-        data_shape = radar.fields["velocity"]["data"][sweep_slice].shape
-        total_gates = data_shape[0] * data_shape[1]
-        try:
-            base_time_str = radar.time["units"].split("since ")[1]
-            base_year = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ").year
-        except Exception:
-            base_year = None
-        is_super_res = radar.instrument_parameters.get("super_resolution", {}).get("data", [0])[0] == 1
-        if base_year is not None and base_year < 2008:
-            return False
-        gate_threshold = 1000000
-        return total_gates >= gate_threshold or is_super_res
-    except Exception:
-        return True
+    """Determine if radar file is low-res or high-res - kept for compatibility."""
+    data_age = detect_data_age(radar)
+    return data_age == "new"
 
 def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
     try:
         # CRITICAL FIX: Set radar location from RADAR_LIST if not valid
-        # This MUST happen before creating the display object
         radar_id = os.path.basename(file_path)[:4]
         
         # Check if radar has valid coordinates
@@ -538,12 +715,15 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
                 if rid == radar_id:
                     radar.latitude["data"] = np.array([rlat])
                     radar.longitude["data"] = np.array([rlon])
-                    radar.altitude["data"] = np.array([0])  # Also set altitude
+                    radar.altitude["data"] = np.array([0])
                     break
+        
+        # Use corrected_velocity if available, otherwise dealiased_velocity
+        vel_field = "corrected_velocity_mph" if "corrected_velocity_mph" in radar.fields else "dealiased_velocity"
         
         # More robust data validation
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
-        vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
+        vel_data = radar.fields[vel_field]["data"][radar.get_slice(vel_sweep_index)]
 
         # Check for any non-masked, finite data
         refl_valid = np.any(~np.ma.getmaskarray(refl_data))
@@ -568,7 +748,7 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
 
         titles = [
             f"Reflectivity - {refl_elevation:.2f}° Tilt",
-            f"Dealiased Velocity - {vel_elevation:.2f}° Tilt"
+            f"Corrected Velocity - {vel_elevation:.2f}° Tilt"
         ]
 
         # Set plot extent using the radar's actual location
@@ -579,27 +759,20 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         extent = [radar_lon - lon_deg, radar_lon + lon_deg,
                   radar_lat - lat_deg, radar_lat + lat_deg]
 
-        # Use custom colormaps or PyART colormaps without prefix
+        # Use custom colormaps
         try:
-            # First try custom colormaps
             refl_cmap, refl_values = create_reflectivity_colormap()
             vel_cmap, vel_values = create_velocity_colormap()
         except:
-            # Fallback to PyART colormaps (without 'pyart_' prefix)
-            try:
-                refl_cmap = "NWSRef"
-                vel_cmap = "balance"
-            except:
-                # Final fallback to matplotlib colormaps
-                refl_cmap = "jet"
-                vel_cmap = "RdBu_r"
+            refl_cmap = "NWSRef"
+            vel_cmap = "balance"
 
-        # Plot reflectivity with CORRECT range matching the colormap
+        # Plot reflectivity
         display.plot_ppi_map(
             "reflectivity",
             sweep=refl_sweep_index,
-            vmin=-32.0,  # FIXED: Use exact colormap minimum
-            vmax=94.5,   # FIXED: Use exact colormap maximum
+            vmin=-32.0,
+            vmax=94.5,
             ax=ax1,
             projection=projection,
             title=titles[0],
@@ -608,29 +781,23 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
             resolution='50m'
         )
 
-        # Plot velocity with improved colormap and scaling
-        nyquist_vel = 28.0  # Default
-        if "nyquist_velocity" in radar.instrument_parameters:
-            nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
-            if len(nyq_data) > 0:
-                nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
-
-        vel_range = min(65, nyquist_vel * 2)
+        # Plot velocity with proper field and range
+        vel_range = 127 if vel_field == "corrected_velocity_mph" else 65
 
         display.plot_ppi_map(
-            "dealiased_velocity",
+            vel_field,
             sweep=vel_sweep_index,
             vmin=-vel_range,
             vmax=vel_range,
             ax=ax2,
             projection=projection,
             title=titles[1],
-            colorbar_label="Velocity (m/s)",
+            colorbar_label="Velocity (MPH)" if vel_field == "corrected_velocity_mph" else "Velocity (m/s)",
             cmap=vel_cmap,
             resolution='50m'
         )
 
-        # Enhanced main title with more metadata
+        # Enhanced main title
         try:
             base_time_str = radar.time["units"].split("since ")[1]
             scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
@@ -677,11 +844,14 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         return None
 
 def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
-    """Basic radar plotting without CartoPy dependencies."""
+    """Basic radar plotting without CartoPy dependencies - FIXED VERSION."""
     try:
+        # Use corrected_velocity if available, otherwise dealiased_velocity
+        vel_field = "corrected_velocity_mph" if "corrected_velocity_mph" in radar.fields else "dealiased_velocity"
+        
         # Get radar data
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
-        vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
+        vel_data = radar.fields[vel_field]["data"][radar.get_slice(vel_sweep_index)]
         
         # Check for valid data
         refl_valid = np.any(~np.ma.getmaskarray(refl_data))
@@ -702,19 +872,18 @@ def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, c
         # Create plot
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
         
-        # Use custom colormaps first, then fallback
+        # Use custom colormaps
         try:
             refl_cmap, _ = create_reflectivity_colormap()
             vel_cmap, _ = create_velocity_colormap()
         except:
-            # Fallback to standard matplotlib colormaps
             refl_cmap = "jet"
             vel_cmap = "RdBu_r"
         
-        # Plot reflectivity with CORRECT range matching Script A
+        # Plot reflectivity
         im1 = ax1.pcolormesh(x/1000, y/1000, refl_data, 
-                            vmin=-32.0,  # FIXED: Use exact colormap minimum
-                            vmax=94.5,   # FIXED: Use exact colormap maximum
+                            vmin=-32.0,
+                            vmax=94.5,
                             cmap=refl_cmap, shading='auto')
         ax1.set_title(f"Reflectivity - {radar.elevation['data'][radar.get_slice(refl_sweep_index)].mean():.2f}° Tilt", fontsize=14)
         ax1.set_xlabel('Distance East (km)')
@@ -722,26 +891,20 @@ def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, c
         ax1.set_aspect('equal')
         plt.colorbar(im1, ax=ax1, label='Reflectivity (dBZ)')
         
-        # Plot velocity with improved scaling
-        nyquist_vel = 28.0  # Default
-        if "nyquist_velocity" in radar.instrument_parameters:
-            nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
-            if len(nyq_data) > 0:
-                nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
-        
-        vel_range = min(65, nyquist_vel * 2)  # Match Script A's approach
+        # Plot velocity with proper range
+        vel_range = 127 if vel_field == "corrected_velocity_mph" else 65
         
         im2 = ax2.pcolormesh(x/1000, y/1000, vel_data, 
                             vmin=-vel_range, 
                             vmax=vel_range, 
                             cmap=vel_cmap, shading='auto')
-        ax2.set_title(f"Dealiased Velocity - {radar.elevation['data'][radar.get_slice(vel_sweep_index)].mean():.2f}° Tilt", fontsize=14)
+        ax2.set_title(f"Corrected Velocity - {radar.elevation['data'][radar.get_slice(vel_sweep_index)].mean():.2f}° Tilt", fontsize=14)
         ax2.set_xlabel('Distance East (km)')
         ax2.set_ylabel('Distance North (km)')
         ax2.set_aspect('equal')
-        plt.colorbar(im2, ax=ax2, label='Velocity (m/s)')
+        plt.colorbar(im2, ax=ax2, label='Velocity (MPH)' if vel_field == "corrected_velocity_mph" else 'Velocity (m/s)')
         
-        # Enhanced main title with more metadata
+        # Enhanced main title
         try:
             base_time_str = radar.time["units"].split("since ")[1]
             scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
@@ -824,7 +987,7 @@ Full radar processing requires PyART and CartoPy.
     return fig
 
 def process_radar_file_robust(file_url, filename, radar_lat, radar_lon):
-    """Process radar file with robust error handling and fallbacks."""
+    """Process radar file with robust error handling and fallbacks - UPDATED."""
     if not PYART_AVAILABLE:
         st.warning("PyART not available - showing basic radar information instead.")
         return create_fallback_visualization(
@@ -842,32 +1005,26 @@ def process_radar_file_robust(file_url, filename, radar_lat, radar_lon):
         if "reflectivity" not in radar.fields or "velocity" not in radar.fields:
             raise Exception("Required fields missing in radar file.")
 
-        is_high_res = check_resolution(radar)
-        
-        sweep_info = get_sweep_info(radar)
-        if not sweep_info:
-            raise Exception("No valid sweeps found in radar file.")
+        # Find best sweeps using improved logic
+        refl_sweep = find_best_sweep(radar, 'reflectivity')
+        vel_sweep = find_best_sweep(radar, 'velocity')
 
-        pairs = pair_sweeps(sweep_info, is_high_res=is_high_res)
-        if not pairs:
-            raise Exception("No paired sweeps found in radar file.")
+        print(f"Using reflectivity sweep: {refl_sweep}")
+        print(f"Using velocity sweep: {vel_sweep}")
 
-        # Use the first pair
-        refl_sweep, vel_sweep = pairs[0]
-
-        # Perform velocity dealiasing
-        simple_improved_dealias_velocity(radar, vel_sweep["sweep_index"])
+        # Perform velocity dealiasing with improved method
+        simple_improved_dealias_velocity(radar, vel_sweep)
 
         # Create plot based on available dependencies
         if CARTOPY_AVAILABLE:
             fig = plot_radar_data(
-                radar, refl_sweep["sweep_index"], vel_sweep["sweep_index"],
+                radar, refl_sweep, vel_sweep,
                 filename, radar_lat, radar_lon
             )
         else:
             # Use matplotlib-only plotting
             fig = plot_radar_data_basic(
-                radar, refl_sweep["sweep_index"], vel_sweep["sweep_index"],
+                radar, refl_sweep, vel_sweep,
                 filename, radar_lat, radar_lon
             )
 
