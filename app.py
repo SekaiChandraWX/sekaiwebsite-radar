@@ -1,9 +1,16 @@
 import streamlit as st
+import pyart
+import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
 import numpy as np
+from matplotlib.colors import ListedColormap
 from datetime import datetime, timedelta
+import matplotlib.ticker as mticker
 from geopy.geocoders import Nominatim
 import requests
 from bs4 import BeautifulSoup
@@ -15,15 +22,15 @@ import time
 import gc
 import logging
 
+# Suppress matplotlib font debugging messages
+logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
+
 # Set page config
 st.set_page_config(
     page_title="NEXRAD Radar Viewer", 
     page_icon="📡",
     layout="wide"
 )
-
-# Suppress matplotlib font debugging messages
-logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
 
 # Full radar list with ID, latitude, longitude
 RADAR_LIST = [
@@ -145,7 +152,7 @@ def get_nexrad_files_for_date(radar_id, date_obj):
         # Parse file times
         file_times = []
         for url in file_urls:
-            filename = url.split('/')[-1]
+            filename = os.path.basename(url)
             try:
                 file_time_str = filename[4:19]
                 file_time = datetime.strptime(file_time_str, "%Y%m%d_%H%M%S")
@@ -159,77 +166,491 @@ def get_nexrad_files_for_date(radar_id, date_obj):
         st.error(f"Error accessing NOAA data for {radar_id}: {str(e)}")
         return []
 
-def create_simple_radar_plot(radar_id, radar_lat, radar_lon, filename):
-    """Create a simple radar plot showing station location and basic info."""
-    fig, ax = plt.subplots(figsize=(12, 8))
+def download_radar_file(file_url):
+    """Download radar file to temporary location."""
+    filename = os.path.basename(file_url)
     
-    # Parse time from filename
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.gz' if filename.endswith('.gz') else '') as tmp_file:
+        temp_path = tmp_file.name
+    
     try:
-        date_str = filename[4:12]
-        time_str = filename[13:19]
-        dt = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
-        time_formatted = dt.strftime("%B %d, %Y at %H:%M UTC")
-    except:
-        time_formatted = "Unknown Time"
-    
-    # Create simple map-like visualization
-    # Set up coordinate system around radar location
-    extent = 2.0  # degrees
-    
-    ax.set_xlim(radar_lon - extent, radar_lon + extent)
-    ax.set_ylim(radar_lat - extent, radar_lat + extent)
-    
-    # Add grid
-    ax.grid(True, alpha=0.3)
-    
-    # Plot radar location
-    ax.plot(radar_lon, radar_lat, 'ro', markersize=15, label=f'{radar_id} Radar')
-    
-    # Add range rings (in degrees, approximate)
-    for radius_miles in [50, 100, 150, 200]:
-        # Convert miles to degrees (rough approximation)
-        radius_deg = radius_miles / 69.0
-        circle = plt.Circle((radar_lon, radar_lat), radius_deg, 
-                          fill=False, color='gray', alpha=0.5, linestyle='--')
-        ax.add_patch(circle)
-        ax.text(radar_lon + radius_deg, radar_lat, f'{radius_miles} mi', 
-               fontsize=8, alpha=0.7)
-    
-    # Labels and title
-    ax.set_xlabel('Longitude')
-    ax.set_ylabel('Latitude')
-    ax.set_title(f'{radar_id} NEXRAD Station\n{time_formatted}', fontsize=14, fontweight='bold')
-    ax.legend()
-    
-    # Add info text
-    info_text = f"""
-Station: {radar_id}
-Location: {radar_lat:.3f}°N, {radar_lon:.3f}°W
-File: {filename}
+        urllib.request.urlretrieve(file_url, temp_path)
+        return temp_path
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise Exception(f"Download error: {str(e)}")
 
-Note: This is a simplified view showing radar location.
-Full radar data processing requires additional dependencies
-not available in this cloud deployment.
-    """
-    
-    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=10,
-           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-    
-    # Attribution
-    fig.text(0.5, 0.02, "NEXRAD Data Viewer | Data from NOAA/National Weather Service",
-             ha='center', fontsize=10, style='italic')
-    
-    plt.tight_layout()
-    return fig
+def miles_to_degrees(miles, latitude):
+    """Convert miles to degrees at a given latitude."""
+    lat_degrees = miles / 69.0
+    lon_degrees = miles / (69.0 * np.cos(np.radians(latitude)))
+    return lat_degrees, lon_degrees
+
+def create_reflectivity_colormap():
+    color_data = [
+        (-32.0, 115, 77, 172), (-31.5, 115, 78, 168), (-31.0, 115, 79, 165), (-30.5, 115, 81, 162),
+        (-30.0, 116, 82, 158), (-29.5, 116, 84, 155), (-29.0, 116, 85, 152), (-28.5, 117, 86, 148),
+        (-28.0, 117, 88, 145), (-27.5, 117, 89, 142), (-27.0, 118, 91, 138), (-26.5, 118, 92, 135),
+        (-26.0, 118, 94, 132), (-25.5, 119, 95, 128), (-25.0, 119, 96, 125), (-24.5, 119, 98, 122),
+        (-24.0, 120, 99, 118), (-23.5, 120, 101, 115), (-23.0, 120, 102, 112), (-22.5, 121, 103, 108),
+        (-22.0, 121, 105, 105), (-21.5, 121, 106, 102), (-21.0, 122, 108, 98), (-20.5, 122, 109, 95),
+        (-20.0, 122, 111, 92), (-19.5, 123, 112, 88), (-19.0, 123, 113, 85), (-18.5, 123, 115, 82),
+        (-18.0, 124, 116, 78), (-17.5, 124, 118, 75), (-17.0, 124, 119, 72), (-16.5, 125, 121, 69),
+        (-16.0, 127, 123, 72), (-15.5, 129, 125, 75), (-15.0, 131, 127, 79), (-14.5, 133, 130, 82),
+        (-14.0, 135, 132, 85), (-13.5, 137, 134, 89), (-13.0, 139, 137, 92), (-12.5, 141, 139, 96),
+        (-12.0, 144, 141, 99), (-11.5, 146, 144, 102), (-11.0, 148, 146, 106), (-10.5, 150, 148, 109),
+        (-10.0, 152, 151, 113), (-9.5, 154, 153, 116), (-9.0, 156, 155, 119), (-8.5, 158, 158, 123),
+        (-8.0, 161, 160, 126), (-7.5, 163, 162, 130), (-7.0, 165, 165, 133), (-6.5, 167, 167, 136),
+        (-6.0, 169, 169, 140), (-5.5, 171, 172, 143), (-5.0, 173, 174, 147), (-4.5, 175, 176, 150),
+        (-4.0, 178, 179, 154), (-3.5, 173, 175, 153), (-3.0, 168, 171, 152), (-2.5, 163, 167, 151),
+        (-2.0, 158, 163, 150), (-1.5, 154, 159, 149), (-1.0, 149, 155, 148), (-0.5, 144, 151, 147),
+        (0.0, 139, 147, 146), (0.5, 135, 144, 145), (1.0, 130, 140, 144), (1.5, 125, 136, 143),
+        (2.0, 120, 132, 142), (2.5, 115, 128, 142), (3.0, 111, 124, 141), (3.5, 106, 120, 140),
+        (4.0, 101, 116, 139), (4.5, 96, 112, 138), (5.0, 92, 109, 137), (5.5, 87, 105, 136),
+        (6.0, 82, 101, 135), (6.5, 77, 97, 134), (7.0, 73, 93, 133), (7.5, 68, 89, 132),
+        (8.0, 63, 85, 131), (8.5, 58, 81, 130), (9.0, 54, 78, 130), (9.5, 55, 81, 132),
+        (10.0, 57, 85, 134), (10.5, 59, 89, 136), (11.0, 61, 93, 138), (11.5, 63, 97, 141),
+        (12.0, 65, 101, 143), (12.5, 67, 105, 145), (13.0, 69, 109, 147), (13.5, 71, 113, 149),
+        (14.0, 73, 117, 152), (14.5, 74, 121, 154), (15.0, 76, 125, 156), (15.5, 78, 129, 158),
+        (16.0, 80, 133, 160), (16.5, 82, 137, 163), (17.0, 84, 141, 165), (17.5, 86, 145, 167),
+        (18.0, 88, 149, 169), (18.5, 90, 153, 171), (19.0, 92, 157, 174), (19.5, 76, 165, 142),
+        (20.0, 60, 173, 110), (20.5, 45, 182, 78), (21.0, 42, 175, 72), (21.5, 39, 169, 67),
+        (22.0, 37, 163, 62), (22.5, 34, 156, 56), (23.0, 31, 150, 51), (23.5, 29, 144, 46),
+        (24.0, 26, 137, 40), (24.5, 24, 131, 35), (25.0, 21, 125, 30), (25.5, 18, 118, 24),
+        (26.0, 16, 112, 19), (26.5, 13, 106, 14), (27.0, 11, 100, 9), (27.5, 35, 115, 8),
+        (28.0, 59, 130, 7), (28.5, 83, 145, 6), (29.0, 107, 161, 5), (29.5, 131, 176, 4),
+        (30.0, 155, 191, 3), (30.5, 179, 207, 2), (31.0, 203, 222, 1), (31.5, 227, 237, 0),
+        (32.0, 252, 253, 0), (32.5, 248, 248, 0), (33.0, 244, 243, 0), (33.5, 241, 238, 0),
+        (34.0, 237, 233, 0), (34.5, 233, 228, 0), (35.0, 230, 223, 0), (35.5, 226, 218, 0),
+        (36.0, 222, 213, 0), (36.5, 219, 208, 0), (37.0, 215, 203, 0), (37.5, 211, 198, 0),
+        (38.0, 208, 193, 0), (38.5, 204, 188, 0), (39.0, 200, 183, 0), (39.5, 197, 179, 0),
+        (40.0, 250, 148, 0), (40.5, 246, 144, 0), (41.0, 242, 141, 1), (41.5, 238, 138, 1),
+        (42.0, 234, 135, 2), (42.5, 231, 132, 3), (43.0, 227, 129, 3), (43.5, 223, 126, 4),
+        (44.0, 219, 123, 5), (44.5, 215, 120, 5), (45.0, 212, 116, 6), (45.5, 208, 113, 6),
+        (46.0, 204, 110, 7), (46.5, 200, 107, 8), (47.0, 196, 104, 8), (47.5, 193, 101, 9),
+        (48.0, 189, 98, 10), (48.5, 185, 95, 10), (49.0, 181, 92, 11), (49.5, 178, 89, 12),
+        (50.0, 249, 35, 11), (50.5, 242, 35, 12), (51.0, 236, 35, 13), (51.5, 230, 35, 14),
+        (52.0, 223, 36, 15), (52.5, 217, 36, 16), (53.0, 211, 36, 17), (53.5, 205, 36, 18),
+        (54.0, 198, 37, 19), (54.5, 192, 37, 20), (55.0, 186, 37, 22), (55.5, 180, 37, 23),
+        (56.0, 173, 38, 24), (56.5, 167, 38, 25), (57.0, 161, 38, 26), (57.5, 155, 38, 27),
+        (58.0, 148, 39, 28), (58.5, 142, 39, 29), (59.0, 136, 39, 30), (59.5, 130, 40, 32),
+        (60.0, 202, 153, 180), (60.5, 201, 146, 176), (61.0, 201, 139, 173), (61.5, 200, 133, 169),
+        (62.0, 200, 126, 166), (62.5, 199, 120, 162), (63.0, 199, 113, 159), (63.5, 199, 106, 155),
+        (64.0, 198, 100, 152), (64.5, 198, 93, 148), (65.0, 197, 87, 145), (65.5, 197, 80, 141),
+        (66.0, 196, 74, 138), (66.5, 196, 67, 134), (67.0, 196, 60, 131), (67.5, 195, 54, 127),
+        (68.0, 195, 47, 124), (68.5, 194, 41, 120), (69.0, 194, 34, 117), (69.5, 194, 28, 114),
+        (70.0, 154, 36, 224), (70.5, 149, 34, 219), (71.0, 144, 33, 215), (71.5, 139, 32, 210),
+        (72.0, 134, 31, 206), (72.5, 129, 30, 201), (73.0, 124, 29, 197), (73.5, 120, 28, 193),
+        (74.0, 115, 27, 188), (74.5, 110, 26, 184), (75.0, 105, 24, 179), (75.5, 100, 23, 175),
+        (76.0, 95, 22, 170), (76.5, 91, 21, 166), (77.0, 86, 20, 162), (77.5, 81, 19, 157),
+        (78.0, 76, 18, 153), (78.5, 71, 17, 148), (79.0, 66, 16, 144), (79.5, 62, 15, 140),
+        (80.0, 132, 253, 255), (80.5, 128, 245, 249), (81.0, 125, 238, 243), (81.5, 121, 231, 237),
+        (82.0, 118, 224, 231), (82.5, 115, 217, 225), (83.0, 111, 210, 219), (83.5, 108, 203, 213),
+        (84.0, 105, 196, 207), (84.5, 101, 189, 201), (85.0, 98, 181, 196), (85.5, 94, 174, 190),
+        (86.0, 91, 167, 184), (86.5, 88, 160, 178), (87.0, 84, 153, 172), (87.5, 81, 146, 166),
+        (88.0, 78, 139, 160), (88.5, 74, 132, 154), (89.0, 71, 125, 148), (89.5, 68, 118, 143),
+        (90.0, 161, 101, 73), (90.5, 155, 90, 65), (91.0, 150, 80, 56), (91.5, 145, 70, 48),
+        (92.0, 140, 60, 40), (92.5, 135, 50, 32), (93.0, 130, 40, 24), (93.5, 125, 30, 16),
+        (94.0, 120, 20, 8), (94.5, 115, 10, 1)
+    ]
+    dbz_values = np.array([x[0] for x in color_data])
+    colors = [(r / 255, g / 255, b / 255) for _, r, g, b in color_data]
+    return ListedColormap(colors, name="custom_reflectivity"), dbz_values
+
+def create_velocity_colormap():
+    color_data = [
+        (-65.4, 127, 0, 207), (-64.9, 255, 0, 132), (-64.4, 249, 0, 132), (-63.9, 243, 0, 133),
+        (-63.4, 237, 0, 134), (-62.8, 231, 0, 135), (-62.3, 225, 1, 136), (-61.8, 219, 1, 137),
+        (-61.3, 212, 1, 137), (-60.8, 206, 1, 138), (-60.3, 200, 1, 139), (-59.8, 194, 2, 140),
+        (-59.3, 188, 2, 141), (-58.7, 182, 2, 142), (-58.2, 175, 2, 142), (-57.7, 169, 2, 143),
+        (-57.2, 163, 3, 144), (-56.7, 157, 3, 145), (-56.2, 151, 3, 146), (-55.7, 145, 3, 147),
+        (-55.1, 138, 3, 147), (-54.6, 132, 4, 148), (-54.1, 126, 4, 149), (-53.6, 120, 4, 150),
+        (-53.1, 114, 4, 151), (-52.6, 108, 4, 152), (-52.1, 93, 5, 153), (-51.5, 85, 5, 153),
+        (-50.5, 77, 4, 153), (-50.0, 69, 4, 153), (-49.5, 61, 3, 153), (-49.0, 52, 3, 153),
+        (-48.5, 44, 3, 153), (-48.0, 36, 2, 153), (-47.5, 28, 2, 153), (-47.0, 22, 2, 153),
+        (-46.5, 22, 12, 156), (-46.0, 23, 23, 160), (-45.4, 24, 34, 163), (-44.9, 25, 44, 167),
+        (-44.4, 26, 55, 170), (-43.9, 27, 66, 174), (-43.4, 28, 76, 177), (-42.9, 29, 87, 181),
+        (-42.4, 30, 98, 184), (-41.9, 31, 108, 188), (-41.3, 32, 119, 192), (-40.8, 33, 130, 195),
+        (-40.3, 34, 140, 199), (-39.8, 35, 151, 202), (-39.3, 36, 162, 206), (-38.8, 37, 172, 209),
+        (-38.3, 38, 183, 213), (-37.8, 39, 194, 216), (-37.2, 40, 204, 220), (-37.0, 48, 224, 227),
+        (-36.0, 52, 224, 227), (-35.5, 58, 224, 227), (-35.0, 65, 225, 228), (-34.5, 71, 226, 229),
+        (-34.0, 78, 226, 229), (-33.5, 84, 227, 230), (-33.0, 91, 228, 231), (-32.5, 97, 229, 232),
+        (-31.9, 104, 229, 232), (-31.4, 110, 230, 233), (-30.9, 123, 231, 234), (-30.4, 130, 232, 235),
+        (-29.9, 136, 233, 236), (-29.4, 143, 234, 237), (-28.9, 149, 234, 237), (-28.4, 156, 235, 238),
+        (-27.8, 162, 236, 239), (-27.3, 169, 236, 239), (-26.8, 175, 237, 240), (-26.3, 182, 238, 241),
+        (-25.8, 167, 241, 218), (-25.3, 154, 242, 200), (-24.8, 140, 243, 181), (-24.3, 127, 245, 163),
+        (-23.7, 113, 246, 144), (-23.2, 100, 247, 126), (-22.7, 87, 248, 108), (-22.2, 73, 250, 89),
+        (-21.7, 60, 251, 71), (-21.2, 46, 252, 52), (-20.7, 33, 253, 34), (-20.2, 3, 250, 3),
+        (-19.6, 3, 245, 3), (-19.1, 3, 240, 3), (-18.6, 3, 234, 3), (-18.1, 3, 229, 3),
+        (-17.6, 3, 224, 3), (-17.1, 3, 219, 3), (-16.6, 3, 213, 3), (-15.9, 3, 208, 3),
+        (-15.4, 3, 203, 3), (-14.9, 3, 198, 3), (-14.4, 3, 192, 3), (-13.9, 3, 187, 3),
+        (-13.4, 3, 182, 3), (-12.9, 3, 177, 3), (-12.4, 2, 171, 2), (-11.8, 2, 166, 2),
+        (-11.3, 2, 161, 2), (-10.8, 2, 156, 2), (-10.3, 2, 150, 2), (-9.8, 2, 145, 2),
+        (-9.3, 2, 140, 2), (-8.8, 2, 135, 2), (-8.2, 2, 129, 2), (-7.7, 2, 124, 2),
+        (-7.2, 2, 119, 2), (-6.7, 2, 114, 2), (-6.2, 2, 108, 2), (-5.7, 2, 103, 2),
+        (-5.1, 5, 102, 3), (-4.6, 78, 121, 76), (-4.1, 82, 122, 80), (-3.6, 86, 124, 84),
+        (-3.1, 90, 125, 88), (-2.6, 94, 126, 92), (-2.1, 98, 128, 96), (-1.5, 102, 129, 100),
+        (-1.0, 106, 130, 104), (-0.5, 110, 132, 108), (-0.3, 114, 133, 112), (0, 0, 0, 0),
+        (0.3, 138, 118, 118), (0.5, 138, 114, 129), (1.0, 138, 108, 122), (1.5, 137, 102, 115),
+        (2.1, 136, 95, 108), (2.6, 136, 89, 101), (3.1, 135, 82, 94), (3.6, 134, 76, 86),
+        (4.1, 133, 69, 79), (4.6, 133, 63, 72), (5.1, 132, 56, 65), (5.7, 110, 0, 0),
+        (6.2, 115, 0, 0), (6.7, 121, 0, 0), (7.2, 126, 0, 0), (7.7, 132, 0, 1),
+        (8.2, 137, 0, 1), (8.8, 143, 0, 1), (9.3, 149, 0, 2), (9.8, 154, 0, 2),
+        (10.3, 160, 0, 2), (10.8, 165, 0, 3), (11.3, 171, 0, 3), (11.8, 176, 0, 3),
+        (12.4, 182, 0, 4), (12.9, 188, 0, 4), (13.4, 193, 0, 4), (13.9, 199, 0, 4),
+        (14.4, 204, 0, 5), (14.9, 210, 0, 5), (15.4, 215, 0, 5), (15.9, 221, 0, 6),
+        (16.5, 227, 0, 6), (16.9, 232, 0, 6), (17.4, 238, 0, 7), (18.0, 243, 0, 7),
+        (18.5, 250, 55, 81), (19.0, 250, 60, 89), (19.5, 250, 65, 97), (20.0, 250, 71, 105),
+        (20.6, 251, 76, 113), (21.1, 251, 82, 122), (21.6, 251, 87, 130), (22.1, 252, 93, 138),
+        (22.6, 252, 98, 146), (23.1, 252, 104, 155), (23.6, 252, 109, 163), (24.2, 253, 115, 171),
+        (24.7, 253, 120, 179), (25.2, 253, 126, 188), (25.7, 254, 131, 196), (26.2, 254, 137, 204),
+        (26.7, 255, 140, 213), (27.2, 255, 149, 208), (27.8, 255, 159, 203), (28.3, 255, 168, 198),
+        (28.8, 255, 178, 193), (29.3, 255, 187, 188), (29.8, 255, 197, 183), (30.3, 255, 206, 178),
+        (30.8, 255, 216, 173), (31.4, 255, 225, 168), (31.9, 255, 232, 163), (32.4, 255, 228, 159),
+        (32.9, 255, 224, 155), (33.4, 255, 219, 151), (33.9, 255, 215, 147), (34.4, 255, 211, 142),
+        (34.9, 255, 206, 138), (35.5, 255, 202, 134), (36.0, 255, 197, 130), (36.5, 255, 193, 125),
+        (37.0, 255, 189, 121), (37.5, 255, 184, 117), (38.0, 255, 180, 113), (38.5, 255, 176, 108),
+        (39.1, 255, 171, 104), (39.6, 255, 167, 100), (40.1, 255, 162, 96), (40.6, 255, 158, 91),
+        (41.1, 255, 154, 87), (41.6, 255, 149, 83), (42.1, 255, 138, 79), (42.6, 252, 135, 78),
+        (43.2, 248, 132, 76), (43.7, 245, 129, 74), (44.2, 241, 126, 72), (44.7, 238, 123, 71),
+        (45.2, 234, 120, 69), (45.7, 231, 117, 67), (46.2, 227, 114, 65), (46.7, 224, 111, 63),
+        (47.3, 220, 108, 62), (47.8, 216, 104, 60), (48.3, 213, 101, 58), (48.8, 209, 98, 56),
+        (49.3, 206, 95, 54), (49.8, 202, 92, 53), (50.3, 199, 89, 51), (50.8, 195, 86, 49),
+        (51.4, 192, 83, 47), (51.9, 188, 80, 45), (52.4, 185, 77, 44), (52.9, 181, 74, 42),
+        (53.4, 177, 70, 40), (53.9, 174, 67, 38), (54.4, 170, 64, 36), (55.0, 167, 61, 35),
+        (55.5, 163, 58, 33), (56.0, 160, 55, 31), (56.5, 156, 52, 29), (57.0, 153, 49, 27),
+        (57.5, 149, 46, 26), (58.0, 146, 43, 24), (58.6, 142, 40, 22), (59.1, 138, 36, 20),
+        (59.6, 135, 33, 18), (60.1, 131, 30, 17), (60.6, 128, 27, 15), (61.1, 121, 21, 11),
+        (61.6, 117, 18, 9), (62.2, 114, 15, 8), (62.7, 110, 12, 6), (63.2, 107, 9, 4),
+        (64.2, 103, 6, 2), (64.9, 255, 255, 255)
+    ]
+    mps_values = np.array([x[0] for x in color_data])
+    colors = [(r / 255, g / 255, b / 255) for _, r, g, b in color_data]
+    return ListedColormap(colors, name="custom_velocity"), mps_values
+
+def get_sweep_info(radar, target_elevation=0.5, tolerance=0.3):
+    """Get information about sweeps with valid data near target elevation."""
+    try:
+        sweep_starts = radar.sweep_start_ray_index["data"]
+        sweep_ends = radar.sweep_end_ray_index["data"]
+        time_data = radar.time["data"]
+        base_time = datetime.strptime(radar.time["units"].split("since ")[1], "%Y-%m-%dT%H:%M:%SZ")
+
+        elevations = np.array(
+            [radar.elevation["data"][start:end + 1].mean() for start, end in zip(sweep_starts, sweep_ends)])
+        mean_times = np.array([time_data[start:end + 1].mean() for start, end in zip(sweep_starts, sweep_ends)])
+        valid_sweeps = np.abs(elevations - target_elevation) <= tolerance
+
+        sweep_info = []
+        for i in np.where(valid_sweeps)[0]:
+            sweep_type = []
+            elevation = elevations[i]
+            # Check reflectivity
+            refl_valid = False
+            if "reflectivity" in radar.fields:
+                refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(i)]
+                refl_valid = np.any(~np.ma.getmaskarray(refl_data) & ~np.isnan(refl_data))
+                if refl_valid:
+                    sweep_type.append("reflectivity")
+
+            # Check velocity
+            vel_valid = False
+            if "velocity" in radar.fields:
+                vel_data = radar.fields["velocity"]["data"][radar.get_slice(i)]
+                vel_valid = np.any(~np.ma.getmaskarray(vel_data) & ~np.isnan(vel_data))
+                if vel_valid:
+                    sweep_type.append("velocity")
+
+            if sweep_type:
+                sweep_time = base_time + timedelta(seconds=int(mean_times[i]))
+                sweep_info.append({
+                    "sweep_index": i,
+                    "time": sweep_time,
+                    "type": sweep_type,
+                    "elevation": elevations[i]
+                })
+        return sweep_info
+    except Exception as e:
+        return []
+
+def pair_sweeps(sweep_info, max_time_diff=30, is_high_res=True):
+    """Pair reflectivity and velocity sweeps within max_time_diff seconds."""
+    refl_sweeps = [s for s in sweep_info if "reflectivity" in s["type"]]
+    vel_sweeps = [s for s in sweep_info if "velocity" in s["type"]]
+
+    effective_time_diff = max_time_diff if is_high_res else 60
+
+    pairs = []
+    used_vel = set()
+    for refl in refl_sweeps:
+        min_diff = float("inf")
+        closest_vel = None
+        refl_time = refl["time"]
+        
+        for vel in vel_sweeps:
+            if vel["sweep_index"] == 1 and vel["sweep_index"] not in used_vel:
+                time_diff = abs((vel["time"] - refl_time).total_seconds())
+                if time_diff <= effective_time_diff and time_diff < min_diff:
+                    min_diff = time_diff
+                    closest_vel = vel
+        
+        if not closest_vel:
+            for vel in vel_sweeps:
+                if vel["sweep_index"] in used_vel:
+                    continue
+                time_diff = abs((vel["time"] - refl_time).total_seconds())
+                if time_diff <= effective_time_diff and time_diff < min_diff:
+                    min_diff = time_diff
+                    closest_vel = vel
+                    
+        if closest_vel:
+            pairs.append((refl, closest_vel))
+            used_vel.add(closest_vel["sweep_index"])
+
+    if not pairs and refl_sweeps and vel_sweeps:
+        refl = min(refl_sweeps, key=lambda s: abs((s["time"] - refl_sweeps[0]["time"]).total_seconds()))
+        vel = min(vel_sweeps, key=lambda s: abs((s["time"] - refl["time"]).total_seconds()))
+        pairs.append((refl, vel))
+
+    return pairs
+
+def simple_improved_dealias_velocity(radar, vel_sweep_index):
+    """Simple but effective velocity dealiasing."""
+    try:
+        nyquist_vel = 28.0
+        if "nyquist_velocity" in radar.instrument_parameters:
+            nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
+            if len(nyq_data) > 0:
+                nyquist_vel = nyq_data[0]
+
+        dealiased_vel = pyart.correct.dealias_region_based(
+            radar,
+            vel_field="velocity",
+            nyquist_vel=nyquist_vel,
+            centered=True,
+            keep_original=True,
+            gatefilter=False
+        )
+
+        radar.add_field("dealiased_velocity", dealiased_vel, replace_existing=True)
+        radar.fields["dealiased_velocity"]["units"] = "m/s"
+
+    except Exception as e:
+        radar.add_field("dealiased_velocity", radar.fields["velocity"], replace_existing=True)
+
+def parse_filename_for_title(file_path):
+    """Parse filename to create plot title."""
+    filename = os.path.basename(file_path)
+    radar_id = filename[:4]
+    date_str = filename[4:12]
+    time_str = filename[13:19]
+    date_time = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
+    date_formatted = date_time.strftime("%B %d, %Y")
+    time_formatted = date_time.strftime("%H:%M")
+    return f"{radar_id} data for {date_formatted} at {time_formatted} UTC"
+
+def check_resolution(radar):
+    """Determine if radar file is low-res or high-res based on year and gate count."""
+    try:
+        sweep_index = 0
+        sweep_slice = radar.get_slice(sweep_index)
+        data_shape = radar.fields["velocity"]["data"][sweep_slice].shape
+        total_gates = data_shape[0] * data_shape[1]
+        try:
+            base_time_str = radar.time["units"].split("since ")[1]
+            base_year = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ").year
+        except Exception:
+            base_year = None
+        is_super_res = radar.instrument_parameters.get("super_resolution", {}).get("data", [0])[0] == 1
+        if base_year is not None and base_year < 2008:
+            return False
+        gate_threshold = 1000000
+        return total_gates >= gate_threshold or is_super_res
+    except Exception:
+        return True
+
+def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
+    """Create radar plot with reflectivity and velocity data."""
+    try:
+        # Validate data
+        refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
+        vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
+
+        refl_valid = np.any(~np.ma.getmaskarray(refl_data))
+        vel_valid = np.any(~np.ma.getmaskarray(vel_data))
+
+        if not refl_valid or not vel_valid:
+            return None
+
+        # Set up the figure
+        fig = plt.figure(figsize=(20, 9))
+        projection = ccrs.PlateCarree()
+
+        ax1 = fig.add_subplot(121, projection=projection)
+        ax2 = fig.add_subplot(122, projection=projection, sharex=ax1, sharey=ax1)
+
+        display = pyart.graph.RadarMapDisplay(radar)
+
+        # Improved titles
+        refl_elevation = radar.elevation["data"][radar.get_slice(refl_sweep_index)].mean()
+        vel_elevation = radar.elevation["data"][radar.get_slice(vel_sweep_index)].mean()
+
+        titles = [
+            f"Reflectivity - {refl_elevation:.2f}° Tilt",
+            f"Dealiased Velocity - {vel_elevation:.2f}° Tilt"
+        ]
+
+        # Set plot extent
+        half_width = 35
+        lat_deg, lon_deg = miles_to_degrees(half_width, center_lat)
+        extent = [center_lon - lon_deg, center_lon + lon_deg,
+                  center_lat - lat_deg, center_lat + lat_deg]
+
+        # Try PyART colormaps, fall back to matplotlib if not available
+        try:
+            refl_cmap = "pyart_NWSRef"
+            vel_cmap = "pyart_balance"
+        except:
+            refl_cmap = "jet"
+            vel_cmap = "RdBu_r"
+
+        # Plot reflectivity
+        display.plot_ppi_map(
+            "reflectivity",
+            sweep=refl_sweep_index,
+            vmin=-32.0,
+            vmax=94.5,
+            ax=ax1,
+            projection=projection,
+            title=titles[0],
+            colorbar_label="Reflectivity (dBZ)",
+            cmap=refl_cmap,
+            resolution='50m'
+        )
+
+        # Plot velocity
+        nyquist_vel = 28.0
+        if "nyquist_velocity" in radar.instrument_parameters:
+            nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
+            if len(nyq_data) > 0:
+                nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
+
+        vel_range = min(65, nyquist_vel * 2)
+
+        display.plot_ppi_map(
+            "dealiased_velocity",
+            sweep=vel_sweep_index,
+            vmin=-vel_range,
+            vmax=vel_range,
+            ax=ax2,
+            projection=projection,
+            title=titles[1],
+            colorbar_label="Velocity (m/s)",
+            cmap=vel_cmap,
+            resolution='50m'
+        )
+
+        # Enhanced main title
+        try:
+            base_time_str = radar.time["units"].split("since ")[1]
+            scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
+            radar_id = os.path.basename(file_path)[:4]
+            main_title = f"{radar_id} - {scan_time.strftime('%B %d, %Y at %H:%M UTC')}"
+        except:
+            main_title = parse_filename_for_title(file_path)
+
+        plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
+
+        # Add attribution
+        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Improved with PyART",
+                 ha='center', fontsize=12, style='italic')
+
+        # Enhance both subplots with geographic features
+        for ax in [ax1, ax2]:
+            ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3, zorder=0)
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.8, color='black', zorder=2)
+            ax.add_feature(cfeature.STATES, linestyle="-", linewidth=0.5, color='darkgray', zorder=2)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.8, color='black', zorder=2)
+
+            ax.set_extent(extent, crs=projection)
+
+            gl = ax.gridlines(crs=projection, draw_labels=True, linestyle=":",
+                              color="gray", alpha=0.7, linewidth=0.5)
+            gl.top_labels = gl.right_labels = False
+            gl.xformatter = LONGITUDE_FORMATTER
+            gl.yformatter = LATITUDE_FORMATTER
+
+            gl.xlocator = mticker.FixedLocator(
+                np.arange(np.floor(extent[0]), np.ceil(extent[1]) + 0.5, 0.5)
+            )
+            gl.ylocator = mticker.FixedLocator(
+                np.arange(np.floor(extent[2]), np.ceil(extent[3]) + 0.5, 0.5)
+            )
+
+            gl.xlabel_style = gl.ylabel_style = {'size': 11, 'color': 'black'}
+
+        plt.tight_layout(pad=2.0, h_pad=2.0, w_pad=2.0, rect=[0, 0.05, 1, 0.92])
+
+        return fig
+
+    except Exception as e:
+        st.error(f"Error plotting radar data: {str(e)}")
+        return None
+
+def process_radar_file(file_url, filename, radar_lat, radar_lon):
+    """Process radar file and create plot."""
+    temp_path = None
+    try:
+        # Download file
+        temp_path = download_radar_file(file_url)
+        
+        # Read radar data
+        radar = pyart.io.read(temp_path)
+
+        if "reflectivity" not in radar.fields or "velocity" not in radar.fields:
+            raise Exception("Required fields missing in radar file.")
+
+        is_high_res = check_resolution(radar)
+        
+        sweep_info = get_sweep_info(radar)
+        if not sweep_info:
+            raise Exception("No valid sweeps found in radar file.")
+
+        pairs = pair_sweeps(sweep_info, is_high_res=is_high_res)
+        if not pairs:
+            raise Exception("No paired sweeps found in radar file.")
+
+        # Use the first pair
+        refl_sweep, vel_sweep = pairs[0]
+
+        # Perform velocity dealiasing
+        simple_improved_dealias_velocity(radar, vel_sweep["sweep_index"])
+
+        # Create plot
+        fig = plot_radar_data(
+            radar, refl_sweep["sweep_index"], vel_sweep["sweep_index"],
+            filename, radar_lat, radar_lon
+        )
+
+        return fig
+
+    except Exception as e:
+        raise Exception(f"Error processing radar file: {str(e)}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        if 'radar' in locals():
+            del radar
+        gc.collect()
 
 # Streamlit UI
 st.title("NEXRAD Radar Data Viewer")
-st.markdown("### Weather Radar Station Locator and File Browser")
+st.markdown("### High-Resolution Weather Radar Imagery")
 
 st.markdown("""
-**Note**: This is a simplified version for cloud deployment. It shows radar station locations 
-and available data files. Full radar data visualization requires additional dependencies 
-that are not available in this environment.
+Access NEXRAD radar data from the National Weather Service. Select a date and radar station 
+to view reflectivity and velocity data with professional-quality visualization.
 """)
 
 col1, col2 = st.columns([1, 2])
@@ -239,7 +660,7 @@ with col1:
     
     # Date selection
     today = datetime.now().date()
-    min_date = datetime(1991, 6, 1).date()
+    min_date = datetime(1991, 6, 1).date()  # NEXRAD started operation
     
     date_input = st.date_input(
         "Date", value=today, min_value=min_date, max_value=today)
@@ -255,6 +676,7 @@ with col1:
             placeholder="e.g., Miami, Los Angeles, Chicago")
         
         radar_options = []
+        selected_radar = None
         
         if location_input:
             with st.spinner("Finding nearby radars..."):
@@ -287,8 +709,6 @@ with col1:
             selected_radar = next(opt for opt in radar_options if opt[0] == selected_option)
             radar_id, radar_lat, radar_lon = selected_radar[1], selected_radar[2], selected_radar[3]
             
-            st.info(f"Selected: {radar_id} at {radar_lat:.3f}°N, {radar_lon:.3f}°W")
-            
             # Get available files for selected date and radar
             if date_input:
                 with st.spinner("Loading available radar times..."):
@@ -313,99 +733,94 @@ with col1:
                         file_url = selected_file[1]
                         filename = selected_file[2]
                         
-                        generate_button = st.button("Show Radar Info", type="primary")
+                        generate_button = st.button("Generate Radar Plot", type="primary")
                         
                         if generate_button:
                             with col2:
-                                st.subheader("Radar Station Information")
-                                fig = create_simple_radar_plot(radar_id, radar_lat, radar_lon, filename)
-                                st.pyplot(fig, use_container_width=True)
-                                plt.close(fig)
-                                
-                                st.success("Radar station information displayed!")
-                                
-                                # Show file info
-                                st.subheader("Available Data File")
-                                st.write(f"**Filename:** {filename}")
-                                st.write(f"**Download URL:** {file_url}")
-                                st.write(f"**File Size:** Available for download from NOAA")
-                                
+                                with st.spinner("Processing radar data... This may take 2-3 minutes."):
+                                    try:
+                                        fig = process_radar_file(file_url, filename, radar_lat, radar_lon)
+                                        
+                                        if fig:
+                                            st.pyplot(fig, use_container_width=True)
+                                            plt.close(fig)
+                                            gc.collect()
+                                            st.success("Radar plot generated successfully!")
+                                            st.info("Right-click on the image to save it to your device.")
+                                        else:
+                                            st.error("Failed to generate radar plot.")
+                                            
+                                    except Exception as e:
+                                        st.error(f"Error generating radar plot: {str(e)}")
                 else:
                     st.warning(f"No radar data available for {radar_id} on {date_input}")
 
 with col2:
+    st.subheader("Radar Visualization")
     if not st.session_state.get('radar_select') or not st.session_state.get('time_select'):
-        st.subheader("Radar Information Display")
-        st.info("Select a radar station and time to view information.")
+        st.info("Select a radar station and time to generate the plot.")
         
         # Information about radar data
         st.markdown("""
         **About NEXRAD Radar Data:**
         
-        - **Network**: 160+ weather radar stations across the United States
-        - **Coverage**: 230-mile radius per station
-        - **Products**: Reflectivity, velocity, spectrum width
-        - **Resolution**: 250m range resolution, 0.5° beam width
+        - **Reflectivity**: Shows precipitation intensity (dBZ scale)
+        - **Velocity**: Shows wind movement toward/away from radar (m/s)
+        - **Range**: Covers approximately 230-mile radius from each radar
+        - **Resolution**: High-resolution data available from 2008+
         - **Updates**: New scans every 4-10 minutes during active weather
         
-        **This Simplified Version Provides:**
-        - Radar station locations and basic information
-        - Available data file listings by date
-        - Direct download links to NOAA data archive
-        - Station coverage area visualization
+        The system automatically pairs reflectivity and velocity data from the 
+        closest available scan times and applies velocity dealiasing for accurate 
+        wind measurements.
         """)
 
 # Information section
-with st.expander("NEXRAD Network Information"):
+with st.expander("NEXRAD Radar Network Information"):
     st.markdown("""
-    The **Next Generation Weather Radar (NEXRAD)** network provides comprehensive weather monitoring 
-    across the United States and territories.
-    
-    **Network Statistics:**
-    - **Total Stations**: 160+ operational radars
-    - **Coverage**: Continental US, Alaska, Hawaii, Puerto Rico
-    - **Operational Since**: 1991 (first installations)
-    - **Upgrade Completed**: 2013 (dual-polarization)
+    The **Next Generation Weather Radar (NEXRAD)** network consists of 160+ weather radar stations 
+    across the United States, providing comprehensive weather monitoring capability.
     
     **Technical Specifications:**
     - **Frequency**: S-band (2.7-3.0 GHz)
-    - **Antenna**: 8.5-meter parabolic dish
-    - **Power**: 750 kilowatts peak
-    - **Range**: 460 km (248 nautical miles)
+    - **Range**: 230 nautical miles (460 km) maximum
+    - **Resolution**: 250m range resolution, 0.5° beam width
+    - **Products**: Reflectivity, velocity, spectrum width, and derived products
     
-    **Data Archive:**
-    - Historical data available from 1991
-    - Real-time data updated every 4-10 minutes
-    - Multiple data products and resolution levels
-    - Free access via NOAA data services
+    **Data Quality Features:**
+    - Dual-polarization capability (2013+ upgrades)
+    - Velocity dealiasing for accurate wind measurements  
+    - Automated quality control and clutter filtering
+    - Super-resolution mode for enhanced detail
+    
+    **Coverage Areas:**
+    - Continental United States
+    - Alaska, Hawaii, and Puerto Rico
+    - Selected overseas military installations
+    
+    Data is provided by the National Weather Service and archived by NOAA.
     """)
 
-with st.expander("Cloud Deployment Limitations"):
+with st.expander("How to Read Radar Data"):
     st.markdown("""
-    **Why This Version is Simplified:**
+    **Reflectivity (Left Panel):**
+    - **Green/Blue**: Light precipitation (drizzle, light rain)
+    - **Yellow**: Moderate precipitation  
+    - **Orange/Red**: Heavy precipitation
+    - **Purple/Magenta**: Very heavy precipitation or hail
     
-    This cloud deployment uses a simplified interface due to dependency limitations:
+    **Velocity (Right Panel):**
+    - **Green colors**: Motion toward the radar
+    - **Red colors**: Motion away from the radar
+    - **Adjacent red/green**: Indicates rotation (possible tornado)
+    - **Speed**: Measured in meters per second (m/s)
     
-    **Missing Dependencies:**
-    - **PyART**: Advanced radar data processing toolkit
-    - **CartoPy**: Geographic projections and mapping
-    - **Complex NetCDF**: Full radar file processing
-    
-    **What This Version Provides:**
-    - Radar station location finder
-    - Available data file browser
-    - Basic station information display
-    - Direct links to download radar files
-    
-    **For Full Functionality:**
-    Run the complete application locally with all dependencies installed, 
-    or use a more capable cloud platform that supports scientific Python packages.
-    
-    **Local Installation:**
-    ```
-    pip install arm-pyart cartopy matplotlib numpy requests beautifulsoup4 geopy
-    ```
+    **Understanding the Display:**
+    - Radar beam travels in straight lines but Earth curves
+    - Higher altitudes sampled at greater distances
+    - Beam blockage may occur near mountains or tall structures
+    - Range rings help estimate distance from radar site
     """)
 
 st.markdown("---")
-st.markdown("*NEXRAD Data Viewer | Data from NOAA/National Weather Service*")
+st.markdown("*Created by Sekai Chandra (@Sekai_WX) | Data from NOAA/National Weather Service*")
