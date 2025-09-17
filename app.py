@@ -520,7 +520,8 @@ def check_resolution(radar):
 def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
     try:
-        # Set radar location properly (crucial for low-res data)
+        # STEP 1: Set the radar's location correctly before doing anything else.
+        # This whole block of code MUST run before creating the display object.
         radar_id = os.path.basename(file_path)[:4]
         radar_lat, radar_lon = center_lat, center_lon
         
@@ -538,7 +539,7 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         radar.latitude["data"] = np.array([radar_lat])
         radar.longitude["data"] = np.array([radar_lon])
 
-        # Validate data
+        # Validate that the data fields are not empty
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
         vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
 
@@ -555,8 +556,11 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         ax1 = fig.add_subplot(121, projection=projection)
         ax2 = fig.add_subplot(122, projection=projection, sharex=ax1, sharey=ax1)
 
+        # STEP 2: NOW create the RadarMapDisplay object.
+        # It will be initialized with the corrected coordinates.
         display = pyart.graph.RadarMapDisplay(radar)
 
+        # STEP 3: Proceed with plotting as before.
         # Titles
         refl_elevation = radar.elevation["data"][radar.get_slice(refl_sweep_index)].mean()
         vel_elevation = radar.elevation["data"][radar.get_slice(vel_sweep_index)].mean()
