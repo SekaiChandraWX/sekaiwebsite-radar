@@ -555,13 +555,20 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         extent = [center_lon - lon_deg, center_lon + lon_deg,
                   center_lat - lat_deg, center_lat + lat_deg]
 
-        # Try PyART colormaps, fall back to matplotlib if not available
+        # Use custom colormaps or PyART colormaps without prefix
         try:
-            refl_cmap = "pyart_NWSRef"
-            vel_cmap = "pyart_balance"
+            # First try custom colormaps
+            refl_cmap, refl_values = create_reflectivity_colormap()
+            vel_cmap, vel_values = create_velocity_colormap()
         except:
-            refl_cmap = "jet"
-            vel_cmap = "RdBu_r"
+            # Fallback to PyART colormaps (without 'pyart_' prefix)
+            try:
+                refl_cmap = "NWSRef"
+                vel_cmap = "balance"
+            except:
+                # Final fallback to matplotlib colormaps
+                refl_cmap = "jet"
+                vel_cmap = "RdBu_r"
 
         # Plot reflectivity with CORRECT range matching the colormap
         display.plot_ppi_map(
@@ -649,27 +656,16 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
 def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Basic radar plotting without CartoPy dependencies."""
     try:
-        # Set radar location properly
-        radar_id = os.path.basename(file_path)[:4]
-        radar_lat, radar_lon = center_lat, center_lon
-        
-        try:
-            parsed_lat = radar.latitude["data"][0]
-            parsed_lon = radar.longitude["data"][0]
-            if parsed_lat != 0.0 or parsed_lon != 0.0:
-                radar_lat, radar_lon = parsed_lat, parsed_lon
-        except:
-            for rid, rlat, rlon in RADAR_LIST:
-                if rid == radar_id:
-                    radar_lat, radar_lon = rlat, rlon
-                    break
-        
-        radar.latitude["data"] = np.array([radar_lat])
-        radar.longitude["data"] = np.array([radar_lon])
-        
         # Get radar data
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
         vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
+        
+        # Check for valid data
+        refl_valid = np.any(~np.ma.getmaskarray(refl_data))
+        vel_valid = np.any(~np.ma.getmaskarray(vel_data))
+        
+        if not refl_valid or not vel_valid:
+            return None
         
         # Get coordinate data
         azimuth = radar.azimuth["data"][radar.get_slice(refl_sweep_index)]
@@ -683,41 +679,46 @@ def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, c
         # Create plot
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
         
-        # Use custom colormaps or fallback
+        # Use custom colormaps first, then fallback
         try:
             refl_cmap, _ = create_reflectivity_colormap()
             vel_cmap, _ = create_velocity_colormap()
         except:
+            # Fallback to standard matplotlib colormaps
             refl_cmap = "jet"
             vel_cmap = "RdBu_r"
         
-        # Plot reflectivity with FIXED range
+        # Plot reflectivity with CORRECT range matching Script A
         im1 = ax1.pcolormesh(x/1000, y/1000, refl_data, 
-                            vmin=-32.0, vmax=94.5, cmap=refl_cmap, shading='auto')
-        ax1.set_title(f"Reflectivity - {radar.elevation['data'][radar.get_slice(refl_sweep_index)].mean():.2f}° Tilt")
+                            vmin=-32.0,  # FIXED: Use exact colormap minimum
+                            vmax=94.5,   # FIXED: Use exact colormap maximum
+                            cmap=refl_cmap, shading='auto')
+        ax1.set_title(f"Reflectivity - {radar.elevation['data'][radar.get_slice(refl_sweep_index)].mean():.2f}° Tilt", fontsize=14)
         ax1.set_xlabel('Distance East (km)')
         ax1.set_ylabel('Distance North (km)')
         ax1.set_aspect('equal')
         plt.colorbar(im1, ax=ax1, label='Reflectivity (dBZ)')
         
-        # Plot velocity
-        nyquist_vel = 28.0
+        # Plot velocity with improved scaling
+        nyquist_vel = 28.0  # Default
         if "nyquist_velocity" in radar.instrument_parameters:
             nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
             if len(nyq_data) > 0:
                 nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
         
-        vel_range = min(30, nyquist_vel)  # FIXED: Use 30 instead of 65
+        vel_range = min(65, nyquist_vel * 2)  # Match Script A's approach
         
         im2 = ax2.pcolormesh(x/1000, y/1000, vel_data, 
-                            vmin=-vel_range, vmax=vel_range, cmap=vel_cmap, shading='auto')
-        ax2.set_title(f"Velocity - {radar.elevation['data'][radar.get_slice(vel_sweep_index)].mean():.2f}° Tilt")
+                            vmin=-vel_range, 
+                            vmax=vel_range, 
+                            cmap=vel_cmap, shading='auto')
+        ax2.set_title(f"Dealiased Velocity - {radar.elevation['data'][radar.get_slice(vel_sweep_index)].mean():.2f}° Tilt", fontsize=14)
         ax2.set_xlabel('Distance East (km)')
         ax2.set_ylabel('Distance North (km)')
         ax2.set_aspect('equal')
         plt.colorbar(im2, ax=ax2, label='Velocity (m/s)')
         
-        # Main title
+        # Enhanced main title with more metadata
         try:
             base_time_str = radar.time["units"].split("since ")[1]
             scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
@@ -729,10 +730,10 @@ def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, c
         plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
         
         # Attribution
-        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Basic matplotlib rendering",
+        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Improved with PyART",
                  ha='center', fontsize=12, style='italic')
         
-        plt.tight_layout()
+        plt.tight_layout(pad=2.0, h_pad=2.0, w_pad=2.0, rect=[0, 0.05, 1, 0.92])
         
         return fig
         
