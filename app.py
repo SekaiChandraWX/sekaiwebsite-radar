@@ -49,31 +49,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# Check dependencies and show status
-dependency_status = {
-    "PyART": PYART_AVAILABLE,
-    "CartoPy": CARTOPY_AVAILABLE, 
-    "Matplotlib Colors": MATPLOTLIB_COLORS_AVAILABLE
-}
-
-# Show dependency status in sidebar
-with st.sidebar:
-    st.subheader("System Status")
-    for dep, available in dependency_status.items():
-        if available:
-            st.success(f"✅ {dep}")
-        else:
-            st.error(f"❌ {dep}")
-    
-    if all(dependency_status.values()):
-        st.success("🎉 Full radar processing available!")
-    else:
-        st.warning("⚠️ Limited functionality - some dependencies missing")
-
 # Suppress matplotlib font debugging messages
 logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
 
-# Full radar list with ID, latitude, longitude
+# PLACEHOLDER: Insert your RADAR_LIST here
 RADAR_LIST = [
     ("KBMX", 33.172, -86.770), ("KEOX", 31.460, -85.459), ("KHTX", 34.931, -86.084),
     ("KMXX", 32.537, -85.790), ("KMOB", 30.679, -88.240), ("KSRX", 35.290, -94.362),
@@ -124,9 +103,29 @@ RADAR_LIST = [
     ("KAKQ", 36.984, -77.008), ("KCXX", 44.511, -73.166), ("KLGX", 47.116, -124.107),
     ("KATX", 48.195, -122.496), ("KOTX", 47.681, -117.626), ("KGRB", 44.499, -88.111),
     ("KARX", 43.823, -91.191), ("KMKX", 42.968, -88.551), ("KRLX", 38.311, -81.723),
-    ("KCYS", 41.152, -104.806), ("KRIW", 43.066, -108.477), ("KHDC", 30.519, -90.407), 
-    ("KJAN", 32.319, -90.077)
+    ("KCYS", 41.152, -104.806), ("KRIW", 43.066, -108.477), ("KHDC", 30.519, -90.407), ("KJAN", 32.319, -90.077)
 ]
+
+# Check dependencies and show status
+dependency_status = {
+    "PyART": PYART_AVAILABLE,
+    "CartoPy": CARTOPY_AVAILABLE, 
+    "Matplotlib Colors": MATPLOTLIB_COLORS_AVAILABLE
+}
+
+# Show dependency status in sidebar
+with st.sidebar:
+    st.subheader("System Status")
+    for dep, available in dependency_status.items():
+        if available:
+            st.success(f"✅ {dep}")
+        else:
+            st.error(f"❌ {dep}")
+    
+    if all(dependency_status.values()):
+        st.success("🎉 Full radar processing available!")
+    else:
+        st.warning("⚠️ Limited functionality - some dependencies missing")
 
 @st.cache_data
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -229,7 +228,8 @@ def miles_to_degrees(miles, latitude):
     return lat_degrees, lon_degrees
 
 def create_reflectivity_colormap():
-    """Create custom reflectivity colormap with Sekai's custom colors"""
+    """Create custom reflectivity colormap"""
+    # PLACEHOLDER: Insert your reflectivity color_data here
     color_data = [
         (-32.0, 115, 77, 172), (-31.5, 115, 78, 168), (-31.0, 115, 79, 165), (-30.5, 115, 81, 162),
         (-30.0, 116, 82, 158), (-29.5, 116, 84, 155), (-29.0, 116, 85, 152), (-28.5, 117, 86, 148),
@@ -301,7 +301,8 @@ def create_reflectivity_colormap():
     return ListedColormap(colors, name="custom_reflectivity"), dbz_values
 
 def create_velocity_colormap():
-    """Create custom velocity colormap with Sekai's custom colors"""
+    """Create custom velocity colormap"""
+    # PLACEHOLDER: Insert your velocity color_data here
     color_data = [
         (-65.4, 127, 0, 207), (-64.9, 255, 0, 132), (-64.4, 249, 0, 132), (-63.9, 243, 0, 133),
         (-63.4, 237, 0, 134), (-62.8, 231, 0, 135), (-62.3, 225, 1, 136), (-61.8, 219, 1, 137),
@@ -389,6 +390,7 @@ def get_sweep_info(radar, target_elevation=0.5, tolerance=0.3):
         for i in np.where(valid_sweeps)[0]:
             sweep_type = []
             elevation = elevations[i]
+            
             # Check reflectivity
             refl_valid = False
             if "reflectivity" in radar.fields:
@@ -514,7 +516,7 @@ def check_resolution(radar):
         return True
 
 def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
-    """Create radar plot with reflectivity and velocity data."""
+    """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
     try:
         # Validate data
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
@@ -535,7 +537,7 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
 
         display = pyart.graph.RadarMapDisplay(radar)
 
-        # Improved titles
+        # Titles
         refl_elevation = radar.elevation["data"][radar.get_slice(refl_sweep_index)].mean()
         vel_elevation = radar.elevation["data"][radar.get_slice(vel_sweep_index)].mean()
 
@@ -550,14 +552,13 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         extent = [center_lon - lon_deg, center_lon + lon_deg,
                   center_lat - lat_deg, center_lat + lat_deg]
 
-        # Use correct PyART colormap names that are available
+        # Use custom colormaps or fallback
         try:
-            refl_cmap = "NWSRef"  # This is available in the deployed PyART
-            vel_cmap = "NWSVel"   # This is available in the deployed PyART
-        except:
-            # Fallback to custom colormaps if PyART ones fail
             refl_cmap, _ = create_reflectivity_colormap()
             vel_cmap, _ = create_velocity_colormap()
+        except:
+            refl_cmap = "jet"
+            vel_cmap = "RdBu_r"
 
         # Plot reflectivity
         display.plot_ppi_map(
@@ -595,7 +596,7 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
             resolution='50m'
         )
 
-        # Enhanced main title
+        # Main title
         try:
             base_time_str = radar.time["units"].split("since ")[1]
             scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
@@ -606,11 +607,11 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
 
         plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
 
-        # Add attribution
-        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Improved with PyART",
+        # Attribution
+        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX)",
                  ha='center', fontsize=12, style='italic')
 
-        # Enhance both subplots with geographic features
+        # Add geographic features
         for ax in [ax1, ax2]:
             ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3, zorder=0)
             ax.add_feature(cfeature.COASTLINE, linewidth=0.8, color='black', zorder=2)
@@ -640,6 +641,82 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
 
     except Exception as e:
         st.error(f"Error plotting radar data: {str(e)}")
+        return None
+
+def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
+    """Basic radar plotting without CartoPy dependencies."""
+    try:
+        # Get radar data
+        refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
+        vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
+        
+        # Get coordinate data
+        azimuth = radar.azimuth["data"][radar.get_slice(refl_sweep_index)]
+        ranges = radar.range["data"]
+        
+        # Convert to Cartesian coordinates
+        range_grid, azimuth_grid = np.meshgrid(ranges, azimuth)
+        x = range_grid * np.sin(np.deg2rad(azimuth_grid))
+        y = range_grid * np.cos(np.deg2rad(azimuth_grid))
+        
+        # Create plot
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
+        
+        # Use custom colormaps or fallback
+        try:
+            refl_cmap, _ = create_reflectivity_colormap()
+            vel_cmap, _ = create_velocity_colormap()
+        except:
+            refl_cmap = "jet"
+            vel_cmap = "RdBu_r"
+        
+        # Plot reflectivity
+        im1 = ax1.pcolormesh(x/1000, y/1000, refl_data, 
+                            vmin=-32.0, vmax=94.5, cmap=refl_cmap, shading='auto')
+        ax1.set_title(f"Reflectivity - {radar.elevation['data'][radar.get_slice(refl_sweep_index)].mean():.2f}° Tilt")
+        ax1.set_xlabel('Distance East (km)')
+        ax1.set_ylabel('Distance North (km)')
+        ax1.set_aspect('equal')
+        plt.colorbar(im1, ax=ax1, label='Reflectivity (dBZ)')
+        
+        # Plot velocity
+        nyquist_vel = 28.0
+        if "nyquist_velocity" in radar.instrument_parameters:
+            nyq_data = radar.instrument_parameters["nyquist_velocity"]["data"]
+            if len(nyq_data) > 0:
+                nyquist_vel = nyq_data[0] if len(nyq_data) == 1 else nyq_data[vel_sweep_index]
+        
+        vel_range = min(65, nyquist_vel * 2)
+        
+        im2 = ax2.pcolormesh(x/1000, y/1000, vel_data, 
+                            vmin=-vel_range, vmax=vel_range, cmap=vel_cmap, shading='auto')
+        ax2.set_title(f"Velocity - {radar.elevation['data'][radar.get_slice(vel_sweep_index)].mean():.2f}° Tilt")
+        ax2.set_xlabel('Distance East (km)')
+        ax2.set_ylabel('Distance North (km)')
+        ax2.set_aspect('equal')
+        plt.colorbar(im2, ax=ax2, label='Velocity (m/s)')
+        
+        # Main title
+        try:
+            base_time_str = radar.time["units"].split("since ")[1]
+            scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
+            radar_id = os.path.basename(file_path)[:4]
+            main_title = f"{radar_id} - {scan_time.strftime('%B %d, %Y at %H:%M UTC')}"
+        except:
+            main_title = parse_filename_for_title(file_path)
+
+        plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
+        
+        # Attribution
+        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Basic matplotlib rendering",
+                 ha='center', fontsize=12, style='italic')
+        
+        plt.tight_layout()
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Error in basic radar plotting: {str(e)}")
         return None
 
 def create_fallback_visualization(radar_id, radar_lat, radar_lon, filename):
@@ -763,65 +840,6 @@ def process_radar_file_robust(file_url, filename, radar_lat, radar_lon):
             del radar
         gc.collect()
 
-def plot_radar_data_basic(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
-    """Basic radar plotting without CartoPy dependencies."""
-    try:
-        # Get radar data
-        refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
-        vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
-        
-        # Get coordinate data
-        azimuth = radar.azimuth["data"][radar.get_slice(refl_sweep_index)]
-        ranges = radar.range["data"]
-        
-        # Convert to Cartesian coordinates
-        range_grid, azimuth_grid = np.meshgrid(ranges, azimuth)
-        x = range_grid * np.sin(np.deg2rad(azimuth_grid))
-        y = range_grid * np.cos(np.deg2rad(azimuth_grid))
-        
-        # Create plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
-        
-        # Plot reflectivity
-        im1 = ax1.pcolormesh(x/1000, y/1000, refl_data, 
-                            vmin=-32, vmax=94.5, cmap='jet', shading='auto')
-        ax1.set_title(f"Reflectivity - {radar.elevation['data'][radar.get_slice(refl_sweep_index)].mean():.2f}° Tilt")
-        ax1.set_xlabel('Distance East (km)')
-        ax1.set_ylabel('Distance North (km)')
-        ax1.set_aspect('equal')
-        plt.colorbar(im1, ax=ax1, label='Reflectivity (dBZ)')
-        
-        # Plot velocity
-        im2 = ax2.pcolormesh(x/1000, y/1000, vel_data, 
-                            vmin=-30, vmax=30, cmap='RdBu_r', shading='auto')
-        ax2.set_title(f"Velocity - {radar.elevation['data'][radar.get_slice(vel_sweep_index)].mean():.2f}° Tilt")
-        ax2.set_xlabel('Distance East (km)')
-        ax2.set_ylabel('Distance North (km)')
-        ax2.set_aspect('equal')
-        plt.colorbar(im2, ax=ax2, label='Velocity (m/s)')
-        
-        # Enhanced main title
-        try:
-            base_time_str = radar.time["units"].split("since ")[1]
-            scan_time = datetime.strptime(base_time_str, "%Y-%m-%dT%H:%M:%SZ")
-            radar_id = os.path.basename(file_path)[:4]
-            main_title = f"{radar_id} - {scan_time.strftime('%B %d, %Y at %H:%M UTC')}"
-        except:
-            main_title = parse_filename_for_title(file_path)
-
-        plt.suptitle(main_title, fontsize=24, fontweight='bold', y=0.95)
-        
-        # Add attribution
-        fig.text(0.5, 0.02, "Plotted by Sekai Chandra (@Sekai_WX) | Basic matplotlib rendering",
-                 ha='center', fontsize=12, style='italic')
-        
-        plt.tight_layout()
-        return fig
-        
-    except Exception as e:
-        st.error(f"Error in basic radar plotting: {str(e)}")
-        return None
-
 # Streamlit UI
 st.title("NEXRAD Radar Data Viewer")
 st.markdown("### High-Resolution Weather Radar Imagery")
@@ -915,36 +933,6 @@ with col1:
                         
                         if generate_button:
                             with col2:
-                                with st.spinner("Processing radar data... This may take 2-3 minutes."):
-                                    try:
-                                        fig = process_radar_file_robust(file_url, filename, radar_lat, radar_lon)
-                                        
-                                        if fig:
-                                            st.pyplot(fig, use_container_width=True)
-                                            plt.close(fig)
-                                            gc.collect()
-                                            
-                                            if all(dependency_status.values()):
-                                                st.success("Full radar plot generated successfully!")
-                                            else:
-                                                st.info("Basic radar information displayed. Install PyART and CartoPy for full functionality.")
-                                            
-                                            st.info("Right-click on the image to save it to your device.")
-                                        else:
-                                            st.error("Failed to generate radar plot.")
-                                            
-                                    except Exception as e:
-                                        st.error(f"Error generating radar plot: {str(e)}")
-                                        
-                                        # Show fallback
-                                        st.info("Showing basic radar station information instead:")
-                                        fallback_fig = create_fallback_visualization(radar_id, radar_lat, radar_lon, filename)
-                                        st.pyplot(fallback_fig, use_container_width=True)
-                                        plt.close(fallback_fig)
-                else:
-                    st.warning(f"No radar data available for {radar_id} on {date_input}")
-
-with col2:
     st.subheader("Radar Visualization")
     if not st.session_state.get('radar_select') or not st.session_state.get('time_select'):
         st.info("Select a radar station and time to generate the plot.")
@@ -1013,3 +1001,33 @@ with st.expander("How to Read Radar Data"):
 
 st.markdown("---")
 st.markdown("*Created by Sekai Chandra (@Sekai_WX) | Data from NOAA/National Weather Service*")
+                                with st.spinner("Processing radar data... This may take 2-3 minutes."):
+                                    try:
+                                        fig = process_radar_file_robust(file_url, filename, radar_lat, radar_lon)
+                                        
+                                        if fig:
+                                            st.pyplot(fig, use_container_width=True)
+                                            plt.close(fig)
+                                            gc.collect()
+                                            
+                                            if all(dependency_status.values()):
+                                                st.success("Full radar plot generated successfully!")
+                                            else:
+                                                st.info("Basic radar information displayed. Install PyART and CartoPy for full functionality.")
+                                            
+                                            st.info("Right-click on the image to save it to your device.")
+                                        else:
+                                            st.error("Failed to generate radar plot.")
+                                            
+                                    except Exception as e:
+                                        st.error(f"Error generating radar plot: {str(e)}")
+                                        
+                                        # Show fallback
+                                        st.info("Showing basic radar station information instead:")
+                                        fallback_fig = create_fallback_visualization(radar_id, radar_lat, radar_lon, filename)
+                                        st.pyplot(fallback_fig, use_container_width=True)
+                                        plt.close(fallback_fig)
+                else:
+                    st.warning(f"No radar data available for {radar_id} on {date_input}")
+
+with col2:
