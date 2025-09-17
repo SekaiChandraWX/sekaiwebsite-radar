@@ -71,6 +71,27 @@ RADAR_STATIONS = {
     "KFFC": {"name": "Atlanta, GA", "lat": 33.363, "lon": -84.566},
     "KVAX": {"name": "Moody AFB, GA", "lat": 30.890, "lon": -83.002},
     "KJGX": {"name": "Robins AFB, GA", "lat": 32.675, "lon": -83.351},
+    "KDMX": {"name": "Des Moines, IA", "lat": 41.731, "lon": -93.723},
+    "KDVN": {"name": "Davenport, IA", "lat": 41.612, "lon": -90.581},
+    "KCBX": {"name": "Boise, ID", "lat": 43.490, "lon": -116.236},
+    "KSFX": {"name": "Idaho Falls, ID", "lat": 43.106, "lon": -112.686},
+    "KLOT": {"name": "Chicago, IL", "lat": 41.604, "lon": -88.085},
+    "KILX": {"name": "Lincoln, IL", "lat": 40.150, "lon": -89.337},
+    "KVWX": {"name": "Evansville, IN", "lat": 38.260, "lon": -87.724},
+    "KIWX": {"name": "Fort Wayne, IN", "lat": 41.359, "lon": -85.700},
+    "KIND": {"name": "Indianapolis, IN", "lat": 39.708, "lon": -86.280},
+    "KDDC": {"name": "Dodge City, KS", "lat": 37.761, "lon": -99.969},
+    "KGLD": {"name": "Goodland, KS", "lat": 39.367, "lon": -101.700},
+    "KTWX": {"name": "Topeka, KS", "lat": 38.997, "lon": -96.232},
+    "KICT": {"name": "Wichita, KS", "lat": 37.654, "lon": -97.443},
+    "KHPX": {"name": "Fort Campbell, KY", "lat": 36.737, "lon": -87.285},
+    "KJKL": {"name": "Jackson, KY", "lat": 37.591, "lon": -83.313},
+    "KLVX": {"name": "Louisville, KY", "lat": 37.975, "lon": -85.944},
+    "KPAH": {"name": "Paducah, KY", "lat": 37.068, "lon": -88.772},
+    "KPOE": {"name": "Fort Polk, LA", "lat": 31.155, "lon": -92.976},
+    "KLCH": {"name": "Lake Charles, LA", "lat": 30.125, "lon": -93.216},
+    "KLIX": {"name": "New Orleans, LA", "lat": 30.337, "lon": -89.825},
+    "KSHV": {"name": "Shreveport, LA", "lat": 32.451, "lon": -93.841},
     # Add more stations as needed...
 }
 
@@ -222,26 +243,55 @@ def create_custom_velocity_colormap():
 
 def parse_nexrad_filename(filename):
     """Parse NEXRAD filename to extract radar station, date, and time"""
-    # Remove path and extension
+    # Remove path and extensions
     basename = os.path.basename(filename)
-    if basename.endswith('.gz'):
-        basename = basename[:-3]
     
-    # Pattern: KXXXYYYYMMDDHHMMSS
-    pattern = r'^(K[A-Z]{3})(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})'
-    match = re.match(pattern, basename)
+    # Remove common extensions
+    for ext in ['.gz', '.bz2', '.Z', '.ar2v']:
+        if basename.endswith(ext):
+            basename = basename[:-len(ext)]
     
-    if match:
-        radar_id, year, month, day, hour, minute, second = match.groups()
-        try:
-            dt = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
+    # Try multiple patterns for different NEXRAD filename formats
+    patterns = [
+        # Real NEXRAD format: KXXXYYYYMMDD_HHMMSS_V##
+        r'^(K[A-Z]{3})(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})_V\d+',
+        # Alternative: KXXXYYYYMMDD_HHMMSS
+        r'^(K[A-Z]{3})(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})',
+        # Standard: KXXXYYYYMMDDHHMMSS
+        r'^(K[A-Z]{3})(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})',
+        # Archive format: KXXXYYYYMMDDHHMM
+        r'^(K[A-Z]{3})(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})',
+        # Just radar ID at start
+        r'^(K[A-Z]{3})',
+    ]
+    
+    for pattern in patterns:
+        match = re.match(pattern, basename)
+        if match:
+            groups = match.groups()
+            radar_id = groups[0]
+            
+            # Try to parse datetime if enough groups
+            if len(groups) >= 7:  # Full datetime
+                year, month, day, hour, minute, second = groups[1:7]
+                try:
+                    dt = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
+                except ValueError:
+                    dt = None
+            elif len(groups) >= 6:  # No seconds
+                year, month, day, hour, minute = groups[1:6]
+                try:
+                    dt = datetime(int(year), int(month), int(day), int(hour), int(minute), 0)
+                except ValueError:
+                    dt = None
+            else:
+                dt = None
+            
             return {
                 'radar_id': radar_id,
                 'datetime': dt,
-                'station_info': RADAR_STATIONS.get(radar_id, {'name': 'Unknown', 'lat': 0, 'lon': 0})
+                'station_info': RADAR_STATIONS.get(radar_id, {'name': 'Unknown Station', 'lat': 0, 'lon': 0})
             }
-        except ValueError:
-            pass
     
     return None
 
@@ -405,24 +455,41 @@ def create_plotly_radar_plot(radar, field_name, sweep_idx, title, color_scale, v
     sweep_slice = radar.get_slice(sweep_idx)
     field_data = radar.fields[field_name]['data'][sweep_slice]
     
-    # Get radar coordinates
-    x, y = pyart.core.antenna_to_cartesian(
-        radar.range['data'],
-        radar.azimuth['data'][sweep_slice],
-        radar.elevation['data'][sweep_slice]
-    )
-    
-    # Convert to km
-    x = x / 1000.0
-    y = y / 1000.0
+    # Get radar coordinates - fix broadcasting issue
+    try:
+        # Get range and angle data for this sweep
+        ranges = radar.range['data']
+        azimuths = radar.azimuth['data'][sweep_slice]
+        elevations = radar.elevation['data'][sweep_slice]
+        
+        # Create meshgrid for proper broadcasting
+        range_2d, azimuth_2d = np.meshgrid(ranges, azimuths)
+        elevation_2d = np.broadcast_to(elevations.reshape(-1, 1), azimuth_2d.shape)
+        
+        # Convert to cartesian coordinates
+        x = range_2d * np.sin(np.deg2rad(azimuth_2d)) * np.cos(np.deg2rad(elevation_2d))
+        y = range_2d * np.cos(np.deg2rad(azimuth_2d)) * np.cos(np.deg2rad(elevation_2d))
+        
+        # Convert to km
+        x = x / 1000.0
+        y = y / 1000.0
+        
+    except Exception as e:
+        st.error(f"Error creating coordinate system: {e}")
+        # Fallback: create simple coordinate system
+        ranges = radar.range['data']
+        azimuths = radar.azimuth['data'][sweep_slice]
+        range_2d, azimuth_2d = np.meshgrid(ranges, azimuths)
+        x = range_2d * np.sin(np.deg2rad(azimuth_2d)) / 1000.0
+        y = range_2d * np.cos(np.deg2rad(azimuth_2d)) / 1000.0
     
     # Create the plot
     fig = go.Figure()
     
     # Add the radar data as a heatmap
     fig.add_trace(go.Heatmap(
-        x=x[0, :],
-        y=y[:, 0],
+        x=x[0, :] if x.ndim > 1 else x,
+        y=y[:, 0] if y.ndim > 1 else y,
         z=field_data,
         colorscale=color_scale,
         zmin=vmin,
@@ -486,14 +553,36 @@ def main():
     st.title("NEXRAD Radar Data Viewer")
     st.markdown("Upload a NEXRAD Level II file to visualize reflectivity and velocity data with interactive zooming.")
     
-    # Add info about the app
-    with st.expander("About this application"):
+    # PROMINENT FILE UPLOAD SECTION
+    st.markdown("---")
+    st.markdown("### 📁 Upload Your NEXRAD File")
+    
+    # Create columns for better layout
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        uploaded_file = st.file_uploader(
+            "Choose your NEXRAD Level II file",
+            type=['gz', 'ar2v', 'Z', 'bz2'],
+            help="Supported formats: .gz, .ar2v, .Z, .bz2 (Maximum size: 200MB)",
+            key="nexrad_uploader"
+        )
+    
+    with col2:
+        if uploaded_file is not None:
+            file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+            st.success(f"✅ File loaded")
+            st.write(f"**Size:** {file_size_mb:.1f} MB")
+            st.write(f"**Name:** {uploaded_file.name}")
+    
+    # Add info about the app in an expandable section
+    with st.expander("ℹ️ About this application"):
         st.markdown("""
         This application processes NEXRAD Level II radar data files and creates interactive visualizations of:
         - **Reflectivity data**: Shows precipitation intensity (dBZ scale)
         - **Velocity data**: Shows radial wind speeds with advanced dealiasing (MPH scale)
         
-        **Supported file formats**: .gz, .ar2v, .Z
+        **Supported file formats**: .gz, .ar2v, .Z, .bz2
         
         **Features**:
         - Automatic radar station detection from filename
@@ -504,43 +593,47 @@ def main():
         **File naming convention**: KXXXYYYYMMDDHHMMSS (e.g., KHTX20240315123000.gz)
         """)
 
-    # Sidebar for controls
-    with st.sidebar:
-        st.header("Controls")
-        
-        # File upload with better help text
-        uploaded_file = st.file_uploader(
-            "Choose NEXRAD file",
-            type=['gz', 'ar2v', 'Z'],
-            help="Upload NEXRAD Level II files. Maximum file size: 200MB"
-        )
-        
-        # Display mode selection
-        display_mode = st.radio(
-            "Display Mode",
-            ["Reflectivity", "Velocity", "Both"],
-            index=0,
-            help="Choose which radar products to display"
-        )
-        
-        # Advanced options
-        with st.expander("Advanced Options"):
+    # Sidebar for controls (only show when file is uploaded)
+    if uploaded_file is not None:
+        with st.sidebar:
+            st.header("🎛️ Display Controls")
+            
+            # Display mode selection
+            display_mode = st.radio(
+                "Display Mode",
+                ["Reflectivity", "Velocity", "Both"],
+                index=0,
+                help="Choose which radar products to display"
+            )
+            
+            # Advanced options
+            st.markdown("### ⚙️ Advanced Options")
             max_range = st.slider("Maximum Range (km)", 50, 300, 250, 25)
             show_range_rings = st.checkbox("Show Range Rings", True)
+            
+            # File info section
+            st.markdown("---")
+            st.markdown("### 📊 File Information")
 
     if uploaded_file is not None:
         try:
             # Parse filename for radar info
             file_info = parse_nexrad_filename(uploaded_file.name)
             
+            # Display file information in sidebar
             if file_info:
-                st.sidebar.success("File Information Detected")
-                st.sidebar.write(f"**Radar Station:** {file_info['radar_id']}")
+                st.sidebar.success("✅ File Details Detected")
+                st.sidebar.write(f"**Radar:** {file_info['radar_id']}")
                 st.sidebar.write(f"**Location:** {file_info['station_info']['name']}")
-                st.sidebar.write(f"**Date/Time:** {file_info['datetime'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                if file_info['datetime']:
+                    st.sidebar.write(f"**Time:** {file_info['datetime'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
                 st.sidebar.write(f"**Coordinates:** {file_info['station_info']['lat']:.3f}°N, {file_info['station_info']['lon']:.3f}°W")
             else:
-                st.sidebar.warning("Could not parse filename for radar information")
+                st.sidebar.warning("⚠️ Could not parse radar info from filename")
+                st.sidebar.write("File will still be processed, but station info unavailable.")
+            
+            # Show available fields in sidebar
+            st.sidebar.markdown("### 🔍 Processing Status")
             
             # Save uploaded file to temporary location
             with tempfile.NamedTemporaryFile(delete=False, suffix='.gz') as tmp_file:
@@ -548,23 +641,23 @@ def main():
                 tmp_file_path = tmp_file.name
             
             # Load radar data
-            with st.spinner("Loading radar data..."):
+            with st.spinner("📡 Loading radar data..."):
                 radar = pyart.io.read_nexrad_archive(tmp_file_path)
             
             # Clean up temp file
             os.unlink(tmp_file_path)
             
-            # Display available fields
+            # Display available fields in sidebar
             st.sidebar.write("**Available Fields:**")
             for field in radar.fields.keys():
-                st.sidebar.write(f"- {field}")
+                st.sidebar.write(f"✓ {field}")
             
             # Check for required fields
             has_reflectivity = 'reflectivity' in radar.fields
             has_velocity = 'velocity' in radar.fields
             
             if not has_reflectivity:
-                st.error("Reflectivity field not found in radar data.")
+                st.error("❌ Reflectivity field not found in radar data.")
                 return
             
             # Find best sweeps
@@ -578,7 +671,7 @@ def main():
             dealiased_available = False
             
             if has_velocity:
-                with st.spinner("Processing velocity data..."):
+                with st.spinner("⚡ Processing velocity data..."):
                     if data_age == "new":
                         success = advanced_velocity_dealiasing_new_data(radar, vel_sweep)
                         if not success:
@@ -593,8 +686,9 @@ def main():
                         velocity_mph['data'] = velocity_mph['data'] * 2.237
                         velocity_mph['units'] = 'MPH'
                         radar.add_field("corrected_velocity_mph", velocity_mph, replace_existing=True)
+                        st.sidebar.success("✅ Velocity dealiasing completed")
                     else:
-                        st.warning("Using original velocity data")
+                        st.sidebar.warning("⚠️ Using original velocity data")
                         radar.add_field("corrected_velocity", radar.fields["velocity"], replace_existing=True)
                         velocity_mph = radar.fields["corrected_velocity"].copy()
                         velocity_mph['data'] = velocity_mph['data'] * 2.237
@@ -680,22 +774,25 @@ def main():
         with col1:
             st.markdown("""
             ### Expected File Format
-            NEXRAD Level II files should follow the naming convention:
-            - **Format:** `KXXXYYYYMMDDHHMMSS.gz` (or .ar2v, .Z)
-            - **Example:** `KHTX20240315123000.gz`
+            NEXRAD Level II files typically follow these naming conventions:
+            - **Format:** `KXXXYYYYMMDD_HHMMSS_V##.gz`
+            - **Example:** `KLZK20140428_005255_V06.gz`
+            - **Alternative:** `KXXXYYYYMMDDHHMMSS.gz`
             - **Where:**
-              - `KXXX` = Radar station ID (e.g., KHTX)
-              - `YYYY` = Year (e.g., 2024)
-              - `MM` = Month (e.g., 03)
-              - `DD` = Day (e.g., 15)
-              - `HH` = Hour (e.g., 12)
-              - `MM` = Minute (e.g., 30)
-              - `SS` = Second (e.g., 00)
+              - `KXXX` = Radar station ID (e.g., KLZK)
+              - `YYYY` = Year (e.g., 2014)
+              - `MM` = Month (e.g., 04)
+              - `DD` = Day (e.g., 28)
+              - `HH` = Hour (e.g., 00)
+              - `MM` = Minute (e.g., 52)
+              - `SS` = Second (e.g., 55)
+              - `V##` = Version (e.g., V06)
             """)
         
         with col2:
             st.markdown("""
             ### Sample Radar Stations
+            - **KLZK** - Little Rock, AR
             - **KHTX** - Huntsville, AL
             - **KBMX** - Birmingham, AL
             - **KFFC** - Atlanta, GA
