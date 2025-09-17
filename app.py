@@ -520,26 +520,35 @@ def check_resolution(radar):
 def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_lat, center_lon):
     """Create radar plot with reflectivity and velocity data - FIXED VERSION."""
     try:
-        # STEP 1: Set the radar's location correctly before doing anything else.
-        # This whole block of code MUST run before creating the display object.
+        # Get radar ID from filename
         radar_id = os.path.basename(file_path)[:4]
-        radar_lat, radar_lon = center_lat, center_lon
         
-        try:
-            parsed_lat = radar.latitude["data"][0]
-            parsed_lon = radar.longitude["data"][0]
-            if parsed_lat != 0.0 or parsed_lon != 0.0:
-                radar_lat, radar_lon = parsed_lat, parsed_lon
-        except:
-            for rid, rlat, rlon in RADAR_LIST:
-                if rid == radar_id:
-                    radar_lat, radar_lon = rlat, rlon
-                    break
+        # Get the correct radar coordinates from RADAR_LIST
+        radar_lat, radar_lon = None, None
+        for rid, rlat, rlon in RADAR_LIST:
+            if rid == radar_id:
+                radar_lat, radar_lon = rlat, rlon
+                break
         
+        # If not found in list, try to use what's in the radar object
+        if radar_lat is None:
+            try:
+                parsed_lat = radar.latitude["data"][0]
+                parsed_lon = radar.longitude["data"][0]
+                # Use AND instead of OR - both must be valid
+                if parsed_lat != 0.0 and parsed_lon != 0.0:
+                    radar_lat, radar_lon = parsed_lat, parsed_lon
+                else:
+                    # Fallback to center coordinates
+                    radar_lat, radar_lon = center_lat, center_lon
+            except:
+                radar_lat, radar_lon = center_lat, center_lon
+        
+        # Set the radar location in the object
         radar.latitude["data"] = np.array([radar_lat])
         radar.longitude["data"] = np.array([radar_lon])
 
-        # Validate that the data fields are not empty
+        # Validate data
         refl_data = radar.fields["reflectivity"]["data"][radar.get_slice(refl_sweep_index)]
         vel_data = radar.fields["dealiased_velocity"]["data"][radar.get_slice(vel_sweep_index)]
 
@@ -549,7 +558,10 @@ def plot_radar_data(radar, refl_sweep_index, vel_sweep_index, file_path, center_
         if not refl_valid or not vel_valid:
             return None
 
-        # Set up the figure
+        # Create display with corrected coordinates
+        display = pyart.graph.RadarMapDisplay(radar)
+        
+        # Rest of your plotting code remains the same...
         fig = plt.figure(figsize=(20, 9))
         projection = ccrs.PlateCarree()
 
